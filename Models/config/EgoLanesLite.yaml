@@ -12,17 +12,10 @@ checkpoint:
   strict_load: true      # whether to strictly enforce that the keys in state_dict match the keys returned by the model's state_dict function
 
 dataset:
-  training_sets: ["tusimple", "curvelanes"]    # <--- LIST OF DATASETS TO USE FOR TRAIN
-  acdc_root: "/home/sergey/DEV/AI/datasets/acdc"
-  mapillary_root: "/home/sergey/DEV/AI/datasets/mapillary"
-  muses_root: "/home/sergey/DEV/AI/datasets/MUSES"
-  idda_root: "/home/sergey/DEV/AI/datasets/idda"
-  bdd100k_root: "/home/sergey/DEV/AI/datasets/BDD100K"
-  cityscapes_root: "/home/sergey/DEV/AI/datasets/cityscapes"
-  tusimple_root: "/home/sergey/DEV/AI/datasets/TUSimple"
-  curvelanes_root: "/home/sergey/DEV/AI/datasets/Curvelanes"
+  training_sets: ["curvelanes"]    # <--- LIST OF DATASETS TO USE FOR TRAIN
+  curvelanes_root: "/home/deepak/Desktop/qtpie/lane_detection_classification/autoware_vision_pilot/data/curvelanes_with_labels/"
 
-  validation_sets: ["tusimple", "curvelanes"]    # <--- LIST OF DATASETS TO USE FOR VALIDATION
+  validation_sets: ["curvelanes"]    # <--- LIST OF DATASETS TO USE FOR VALIDATION
 
   #augmentations settings for all datasets
   augmentations:
@@ -39,7 +32,7 @@ dataset:
       scale_range: [1.0, 1.0]   # min and max scale for random cropping
 
       width: 800
-      height: 400
+      height: 416
 
     # Horizontal flip
     flip_prob: 0.5
@@ -57,8 +50,8 @@ dataset:
 
 
 dataloader:
-  batch_size: 8             # how many samples per optimization step
-  num_workers: 8            # how many workers for data loading
+  batch_size: 2             # how many samples per optimization step
+  num_workers: 4            # how many workers for data loading
   pin_memory: true          # pin memory for dataloader
   persistent_workers: true  # keep workers alive between epochs
   drop_last: true           # drop last incomplete batch
@@ -106,7 +99,7 @@ scheduler:
 loss:
 
 network:
-  model: "deeplabv3plus"    #deeplabv3plus | fcn | unetplusplus
+  model: "unetplusplus"    #deeplabv3plus | fcn | unetplusplus
   type: "custom"    #standard uses the smp.deeplabv3plus architecture, custom uses my own integrated implementation (used for loading some weights customly)
   
 
@@ -139,6 +132,11 @@ network:
 
     load_decoder: false    # whether to load decoder weights from the pretrained model specified in backbone.pretrained_model_path
     freeze_decoder: false    # whether to freeze decoder weights during training
+
+    #for unetplusplus
+    unetplusplus_decoder_channels: [256, 128, 64, 32, 16] # light: [128, 64, 32, 16, 8], heavy: [512, 256, 128, 64, 32]
+    decoder_interpolation: "nearest"
+    decoder_attention: "scse"
 
   head:
     head_activation: null
