@@ -1,5 +1,5 @@
 experiment:
-  name: "EgoLanesLite"
+  name: "EgoLanesLite_complete_light_noatt_aug_8stride_100ep"
   output_dir: "runs/training/EgoLanesLite/"
   seed: 42
   device: "cuda"    # "cuda", "cuda:0", or "cpu"
@@ -8,12 +8,12 @@ experiment:
     project_name: "EgoLanesLite"     #it is fixed from the account
 
 checkpoint:
-  load_from:         # path to checkpoint to load before training
+  load_from:   # path to checkpoint to load before training
   strict_load: true      # whether to strictly enforce that the keys in state_dict match the keys returned by the model's state_dict function
 
 dataset:
   training_sets: ["curvelanes"]    # <--- LIST OF DATASETS TO USE FOR TRAIN
-  curvelanes_root: "/home/deepak/Desktop/qtpie/lane_detection_classification/autoware_vision_pilot/data/curvelanes_with_labels/"
+  curvelanes_root: "/home/new_user/Desktop/shared-data/Line/Training/Train_Lane_Detection/curvelane_Line_Annotations_New"
 
   validation_sets: ["curvelanes"]    # <--- LIST OF DATASETS TO USE FOR VALIDATION
 
@@ -43,14 +43,28 @@ dataset:
       grid: [1, 2]
       prob: 0.25
 
+    color_aug:
+      enabled: True
+      color_jitter: [0.2, 0.2, 0.2, 0.1]
+      p_color_jitter: 0.3
+      hsv_shift_limit: [10, 20, 20]
+      p_hsv: 0.2
+      random_gamma_limit: [80, 120] # Widened for better shadow/glare handling
+      p_gamma: 0.3
+      clahe_clip_limit: [1.0, 4.0]
+      clahe_tile_grid_size: [8, 8]
+      p_clahe: 0.4 # Slightly higher, very useful for road textures
+      to_gray_prob: 0.1 # Keep low
+      p_channel_shuffle: 0.0 # Disabled
+
     # Noise settings
     noise:
-      profile: "none"   # none | moderate | heavy | roadwork
-      prob: 0.5             # probability noise is applied
+      profile: "moderate"   # none | moderate | heavy | roadwork
+      prob: 0.3             # probability noise is applied
 
 
 dataloader:
-  batch_size: 2             # how many samples per optimization step
+  batch_size: 4             # how many samples per optimization step
   num_workers: 4            # how many workers for data loading
   pin_memory: true          # pin memory for dataloader
   persistent_workers: true  # keep workers alive between epochs
@@ -60,13 +74,13 @@ dataloader:
   shuffle_val: false        # do not shuffle validation data
 
 training:
-  mode: "steps"        # "epoch" or "steps" 
-  max_epochs: 40       # used if mode == "epoch"
+  mode: "epoch"        # "epoch" or "steps" 
+  max_epochs: 100       # used if mode == "epoch"
   max_steps: 150000     # used if mode == "steps". step = optimization step (so affected by batch size and grad accum)
   grad_accum_steps: 1
 
   validation:
-    mode: "steps"        # "epoch" or "steps"
+    mode: "epoch"        # "epoch" or "steps"
     every_n_epochs: 1    # used if mode == "epoch"
     every_n_steps: 2000    # used if mode == "steps"
 
@@ -104,7 +118,7 @@ network:
   
 
   #load a pretrained model to use as backbone (also as decoder if specified)
-  pretrained_model_path:  #"/home/sergey/DEV/AI/AEI/runs/training/segmentation/dlv3plus_efficientnetb1_v2/checkpoints/best_mIoU.pth"     # path to a pretrained model to use as backbone (overrides 'pretrained' flag)
+  pretrained_model_path: #"/home/sergey/DEV/AI/AEI/runs/training/segmentation/dlv3plus_efficientnetb1_v2/checkpoints/best_mIoU.pth"     # path to a pretrained model to use as backbone (overrides 'pretrained' flag)
 
   backbone:
     type: "efficientnet_b0"  # e.g., "resnet50", "efficientnet_b0", etc.
@@ -114,7 +128,7 @@ network:
     encoder_partial_load: false      # whether to partially load encoder weights from the pretrained model specified in pretrained_model_path
     encoder_partial_depth: 4        # how many stages to load if encoder_partial_load is
     
-    output_stride: 16        # 8 or 16
+    output_stride: 8        # 8 or 16
 
     #if pretrained model is used. Ignore the type and pretrained flags
     load_encoder: false             # whether to load encoder weights from the pretrained model specified in pretrained_model_path
@@ -134,9 +148,9 @@ network:
     freeze_decoder: false    # whether to freeze decoder weights during training
 
     #for unetplusplus
-    unetplusplus_decoder_channels: [256, 128, 64, 32, 16] # light: [128, 64, 32, 16, 8], heavy: [512, 256, 128, 64, 32]
+    unetplusplus_decoder_channels: [128, 64, 32, 16, 8] # light: [128, 64, 32, 16, 8], heavy: [512, 256, 128, 64, 32]
     decoder_interpolation: "nearest"
-    decoder_attention: "scse"
+    # decoder_attention: "" # "" | "scse"
 
   head:
     head_activation: null

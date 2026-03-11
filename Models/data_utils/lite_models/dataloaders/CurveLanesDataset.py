@@ -85,8 +85,8 @@ class CurveLanesDataset(BaseDataset):
             f"data_type='{self.data_type}'"
         )
 
-        image_root = os.path.join(self.root, "image")
-        mask_root  = os.path.join(self.root, "mask")
+        image_root = os.path.join(self.root, "CURVELANES", "image")
+        mask_root  = os.path.join(self.root, "CURVELANES", "mask")
 
         if not os.path.isdir(image_root):
             raise FileNotFoundError(f"Missing image directory: {image_root}")

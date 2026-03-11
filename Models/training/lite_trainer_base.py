@@ -92,7 +92,7 @@ class LiteTrainerBase(ABC):
                 segmentation_ckpt=self.network_cfg.get("pretrained_model_path", None),
                 decoder_interpolation=self.decoder_cfg["decoder_interpolation"],
                 decoder_channels=self.decoder_cfg["unetplusplus_decoder_channels"],
-                decoder_attention_type=self.decoder_cfg["decoder_attention"],
+                decoder_attention_type=self.decoder_cfg.get("decoder_attention", None),
                 load_encoder=self.backbone_cfg.get("load_encoder", True),
                 load_decoder=self.decoder_cfg.get("load_decoder", True),
                 freeze_encoder=self.backbone_cfg.get("freeze_encoder", False),

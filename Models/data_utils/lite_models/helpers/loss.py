@@ -40,6 +40,39 @@ class SegmentationLoss(nn.Module):
         """
         return self.loss_fn(logits, targets)
     
+class DiceLoss(nn.Module):
+    def __init__(self, smooth=1.0):
+        super().__init__()
+        self.smooth = smooth
+
+    def forward(self, pred_probs, targets):
+        # Flatten predictions and targets to calculate overlap
+        pred_flat = pred_probs.view(-1)
+        target_flat = targets.view(-1)
+        
+        # Calculate intersection and union
+        intersection = (pred_flat * target_flat).sum()
+        union = pred_flat.sum() + target_flat.sum()
+        
+        # Calculate Dice coefficient
+        dice_score = (2.0 * intersection + self.smooth) / (union + self.smooth)
+        
+        # Return loss (1 - score)
+        return 1.0 - dice_score
+
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=0.25, gamma=2.0):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.bce_with_logits = nn.BCEWithLogitsLoss(reduction='none')
+
+    def forward(self, inputs, targets):
+        bce_loss = self.bce_with_logits(inputs, targets)
+        pt = torch.exp(-bce_loss) # Prevents numerical instability
+        focal_loss = self.alpha * (1 - pt) ** self.gamma * bce_loss
+        return focal_loss.mean()
+    
 
 class LanesLoss(nn.Module):
     """
@@ -63,7 +96,8 @@ class LanesLoss(nn.Module):
 
         self.downsample_factor = downsample_factor
         self.bce = nn.BCEWithLogitsLoss()
-
+        self.dice = DiceLoss()
+        self.focal = FocalLoss(alpha=0.25, gamma=2.0)
 
         # Sobel filters (exact values from original code)
         gx = torch.tensor([
@@ -119,10 +153,16 @@ class LanesLoss(nn.Module):
         if self.downsample_factor > 1:
             gt = self._downsample_gt(gt, factor=self.downsample_factor)
 
-        seg_loss  = self.bce(pred, gt)
-        edge_loss = self._multi_scale_edge_loss(pred, gt)
-        return seg_loss + edge_loss
+        # seg_loss  = self.bce(pred, gt)
+        # edge_loss = self._multi_scale_edge_loss(pred, gt)
+        # return seg_loss + edge_loss
 
+        focal_loss = self.focal(pred, gt)
+        pred_probs = torch.sigmoid(pred) # Prediction logits to [0,1]
+        dice_loss = self.dice(pred_probs, gt)
+        edge_loss = self._multi_scale_edge_loss(pred_probs, gt)
+
+        return focal_loss + dice_loss + (0.5 * edge_loss) # Combined loss
 
     def _downsample_gt(self, gt, factor=4):
         """
@@ -186,7 +226,6 @@ class LanesLoss(nn.Module):
 
         edge_diff = torch.abs(Gx_pred - Gx_gt) + torch.abs(Gy_pred - Gy_gt)
         return torch.mean(edge_diff)
-
 
 # ============================================================
 # DEPTH Loss

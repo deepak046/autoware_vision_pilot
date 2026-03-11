@@ -50,11 +50,11 @@ class EgoLanesLiteTrainer(LiteTrainerBase):
         #build training state (counters, best metrics, etc)
         self._build_training_state()    #in trainer base
 
+        self._build_loss()             #specific to this trainer since we have a custom loss and val function
+
         #resume in case the checkpoint path is specified
         self._maybe_resume()            #in trainer base
 
-
-        self._build_loss()             #specific to this trainer since we have a custom loss and val function
 
     def _build_loss(self):
     
@@ -84,6 +84,7 @@ class EgoLanesLiteTrainer(LiteTrainerBase):
     def run(self):
         print("Starting Lane detection training...")
         stop_training = False
+        self.best_metric = 0.0
 
         while not stop_training:
             if self.train_mode == "epoch" and self.epoch >= self.max_epochs:

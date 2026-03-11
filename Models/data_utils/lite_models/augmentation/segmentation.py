@@ -11,6 +11,78 @@ import torch
 
 
 class SegmentationAugmentation(BaseAugmentation):
+    def _build_color_transforms(self):
+        """Build image-only color-space transforms from cfg.color_aug."""
+        color_cfg = self.cfg.get("color_aug", {}) or {}
+        if not bool(color_cfg.get("enabled", False)):
+            return []
+
+        tfs = []
+
+        # brightness, contrast, saturation, hue
+        cj = color_cfg.get("color_jitter", [0.2, 0.2, 0.2, 0.1])
+        if isinstance(cj, (list, tuple)) and len(cj) == 4:
+            tfs.append(
+                A.ColorJitter(
+                    brightness=float(cj[0]),
+                    contrast=float(cj[1]),
+                    saturation=float(cj[2]),
+                    hue=float(cj[3]),
+                    p=float(color_cfg.get("p_color_jitter", 0.0)),
+                )
+            )
+
+        # hue/saturation/value shifts in OpenCV range
+        hsv = color_cfg.get("hsv_shift_limit", [10, 20, 20])
+        if isinstance(hsv, (list, tuple)) and len(hsv) == 3:
+            tfs.append(
+                A.HueSaturationValue(
+                    hue_shift_limit=int(hsv[0]),
+                    sat_shift_limit=int(hsv[1]),
+                    val_shift_limit=int(hsv[2]),
+                    p=float(color_cfg.get("p_hsv", 0.0)),
+                )
+            )
+
+        gamma_limit = color_cfg.get("random_gamma_limit", [80, 120])
+        if isinstance(gamma_limit, (list, tuple)) and len(gamma_limit) == 2:
+            tfs.append(
+                A.RandomGamma(
+                    gamma_limit=(int(gamma_limit[0]), int(gamma_limit[1])),
+                    p=float(color_cfg.get("p_gamma", 0.0)),
+                )
+            )
+
+        clahe_limit = color_cfg.get("clahe_clip_limit", [1.0, 4.0])
+        clahe_grid = color_cfg.get("clahe_tile_grid_size", [8, 8])
+        if (
+            isinstance(clahe_limit, (list, tuple))
+            and len(clahe_limit) == 2
+            and isinstance(clahe_grid, (list, tuple))
+            and len(clahe_grid) == 2
+        ):
+            tfs.append(
+                A.CLAHE(
+                    clip_limit=(float(clahe_limit[0]), float(clahe_limit[1])),
+                    tile_grid_size=(int(clahe_grid[0]), int(clahe_grid[1])),
+                    p=float(color_cfg.get("p_clahe", 0.0)),
+                )
+            )
+
+        tfs.append(
+            A.ToGray(
+                num_output_channels=3,
+                p=float(color_cfg.get("to_gray_prob", 0.0)),
+            )
+        )
+        tfs.append(
+            A.ChannelShuffle(
+                p=float(color_cfg.get("p_channel_shuffle", 0.0)),
+            )
+        )
+
+        return tfs
+
     def _build(self):
         """
         GEOMETRY ONLY.
@@ -104,6 +176,9 @@ class SegmentationAugmentation(BaseAugmentation):
             flip_p = float(self.cfg.get("flip_prob", 0.0))
             if flip_p > 0:
                 tfs.append(A.HorizontalFlip(p=flip_p))
+
+            # image-only color space transforms
+            tfs.extend(self._build_color_transforms())
 
         else:
             # validation / test
