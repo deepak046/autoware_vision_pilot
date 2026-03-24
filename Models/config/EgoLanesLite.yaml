@@ -1,11 +1,11 @@
 experiment:
-  name: "EgoLanesLite_complete_light_noatt_aug_8stride_100ep"
+  name: "EgoLanesLite_complete_light_noatt_aug_8stride_newloss_100ep"
   output_dir: "runs/training/EgoLanesLite/"
   seed: 42
   device: "cuda"    # "cuda", "cuda:0", or "cpu"
   wandb:
     enabled: true
-    project_name: "EgoLanesLite"     #it is fixed from the account
+    project_name: "EgoLanesLite_stopline"     #it is fixed from the account
 
 checkpoint:
   load_from:   # path to checkpoint to load before training

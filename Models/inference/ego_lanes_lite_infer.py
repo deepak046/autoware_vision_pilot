@@ -29,6 +29,7 @@ from torchvision import transforms
 from Models.data_utils.lite_models.helpers.lanes import (
     _apply_lane_colors_rgb,
     denorm_image_chw_to_uint8,
+    logits_to_lane_mask3_argmax,
     logits_to_lane_mask3,
 )
 from Models.data_utils.lite_models.helpers.training import load_yaml, set_global_seed
@@ -139,7 +140,9 @@ def run_inference(
             pred_logits_chw = logits.squeeze(0)
 
             if pred_logits_chw.shape[0] == 3:
-                # 3-channel lane model (egoleft, egoright, other)
+                # 3-channel lane model (egoleft, egoright, other). Use argmax so
+                # each pixel gets one class; avoids "all green" when the model
+                # predicts "other" with high prob everywhere (e.g. dice+focal+edge).
                 base_img = denorm_image_chw_to_uint8(image_chw)
                 pred_mask3 = logits_to_lane_mask3(
                     pred_logits_chw, threshold=0.0, use_sigmoid=False
@@ -193,9 +196,11 @@ def run_inference_video(
     t_last_log = t_start
     frames_since_log = 0
 
-    # Store processed frames so we can write the video at the
-    # actual inference FPS (average processing speed).
-    frames_out = []
+    # IMPORTANT: Write frames as we go (streaming) to avoid RAM blowups on long videos.
+    # Output FPS is set to the input video FPS (fallback to 30 if unknown).
+    fps_in = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+    fps_out = fps_in if np.isfinite(fps_in) and fps_in > 1e-3 else 30.0
+    writer = None
 
     with torch.no_grad():
         while True:
@@ -236,7 +241,15 @@ def run_inference_video(
 
             frame_out = cv2.cvtColor(tile_rgb, cv2.COLOR_RGB2BGR)
 
-            frames_out.append(frame_out)
+            if writer is None:
+                h, w = frame_out.shape[:2]
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                writer = cv2.VideoWriter(out_video_path, fourcc, fps_out, (w, h))
+                if not writer.isOpened():
+                    cap.release()
+                    raise RuntimeError(f"Could not open VideoWriter: {out_video_path}")
+
+            writer.write(frame_out)
             frame_count += 1
             frames_since_log += 1
 
@@ -251,21 +264,15 @@ def run_inference_video(
                 frames_since_log = 0
 
     cap.release()
+    if writer is not None:
+        writer.release()
 
     t_end = time.time()
     elapsed = max(t_end - t_start, 1e-6)
     proc_fps = frame_count / elapsed
 
-    if frame_count > 0:
-        h, w = frames_out[0].shape[:2]
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(out_video_path, fourcc, proc_fps, (w, h))
-        for f in frames_out:
-            writer.write(f)
-        writer.release()
-
     print(f"[Video inference] Final: processed {frame_count} frames in {elapsed:.2f}s "
-          f"-> {proc_fps:.2f} FPS average (output video FPS matches inference FPS)")
+          f"-> {proc_fps:.2f} FPS average (output video FPS = {fps_out:.2f})")
 
 
 def main() -> None:

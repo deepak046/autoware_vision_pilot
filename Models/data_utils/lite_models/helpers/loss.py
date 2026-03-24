@@ -47,8 +47,8 @@ class DiceLoss(nn.Module):
 
     def forward(self, pred_probs, targets):
         # Flatten predictions and targets to calculate overlap
-        pred_flat = pred_probs.view(-1)
-        target_flat = targets.view(-1)
+        pred_flat = pred_probs.reshape(-1)
+        target_flat = targets.reshape(-1)
         
         # Calculate intersection and union
         intersection = (pred_flat * target_flat).sum()

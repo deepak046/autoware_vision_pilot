@@ -74,6 +74,33 @@ def logits_to_lane_mask3(
     return mask.permute(1, 2, 0).cpu().numpy().astype(bool)
 
 
+def logits_to_lane_mask3_argmax(
+    logits_chw: torch.Tensor,
+    use_sigmoid: bool = True,
+) -> np.ndarray:
+    """
+    Convert logits to a single-class-per-pixel mask using argmax.
+    Use this when the model tends to predict "other" (or any class) with high
+    probability everywhere (e.g. under dice+focal+edge with strong class
+    imbalance); per-channel thresholding would then paint the whole frame one
+    color. Argmax assigns each pixel to exactly one class (the winning channel).
+
+    logits_chw: [3,H,W]
+    return: HxWx3 bool (exactly one True per pixel)
+    """
+    x = logits_chw.detach()
+    if use_sigmoid:
+        x = torch.sigmoid(x)
+    # [3,H,W] -> [H,W] indices in {0,1,2}
+    winner = x.argmax(dim=0)
+    # one-hot to HxWx3 bool
+    mask = torch.zeros_like(x, dtype=torch.bool)
+    mask[0] = winner == 0
+    mask[1] = winner == 1
+    mask[2] = winner == 2
+    return mask.permute(1, 2, 0).cpu().numpy()
+
+
 def tensor_mask3_to_numpy(mask3_chw: torch.Tensor, threshold: float = 0.5) -> np.ndarray:
     """
     GT: [3,H,W] -> HxWx3 bool
