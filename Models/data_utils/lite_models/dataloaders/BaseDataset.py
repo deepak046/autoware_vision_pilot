@@ -41,6 +41,7 @@ class BaseDataset(Dataset):
 
 
     def __getitem__(self, idx):
+        # TODO: Deepak
         img_path, gt_path = self.samples[idx]
 
         # --------------------------------------------------
@@ -73,6 +74,7 @@ class BaseDataset(Dataset):
         # --------------------------------------------------
         # 3) AUGMENTATION PIPELINE (IMAGE + GT)
         # --------------------------------------------------
+        # TODO: Deepak
         image, label = self.aug.apply_augmentation(img, label, dataset_name=self.dataset_name)
 
 

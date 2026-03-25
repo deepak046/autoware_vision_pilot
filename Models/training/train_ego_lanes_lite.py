@@ -20,7 +20,6 @@ def main():
 
     trainer = EgoLanesLiteTrainer(cfg)
 
-
     trainer.run()
 
 

@@ -98,6 +98,7 @@ class LiteTrainerBase(ABC):
                 freeze_encoder=self.backbone_cfg.get("freeze_encoder", False),
                 freeze_decoder=self.decoder_cfg.get("freeze_decoder", False),
                 encoder_depth=self.backbone_cfg.get("encoder_depth", 5),
+                aux_params=self.network_cfg.get("aux_params", None),
                 # bottleneck=self.bottleneck_cfg.get("type", "none"),
                 encoder_partial_load=self.backbone_cfg.get("encoder_partial_load", False),
                 encoder_partial_depth=self.backbone_cfg.get("encoder_partial_depth", 4),

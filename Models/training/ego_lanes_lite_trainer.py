@@ -25,7 +25,7 @@ class EgoLanesLiteTrainer(LiteTrainerBase):
     # -------------------------
     def __init__(self, cfg: dict):
 
-        self.task = "LANE_DETECTION"
+        self.task = "LANE_DETECTION" # TODO: Deepak | data_type is LANE_DETECTION and is set here
 
         # initialize base trainer with the configuration
         super().__init__(cfg)
@@ -44,12 +44,13 @@ class EgoLanesLiteTrainer(LiteTrainerBase):
         #choose the architecture to be used
         self._build_encoder_decoder()   #in trainer base
 
-        #build model, loss, optimizer, scheduler
+        #build model
         self._build_model_stack()       #in trainer base
 
         #build training state (counters, best metrics, etc)
         self._build_training_state()    #in trainer base
 
+        #build loss, optimizer, scheduler
         self._build_loss()             #specific to this trainer since we have a custom loss and val function
 
         #resume in case the checkpoint path is specified
@@ -132,11 +133,12 @@ class EgoLanesLiteTrainer(LiteTrainerBase):
     # -------------------------
     # Train internals
     # -------------------------
+    # TODO: Deepak
     def _train_micro_step(self, batch) -> float:
         images = batch["image"].to(self.device, non_blocking=True)
         masks  = batch["gt"].to(self.device, non_blocking=True)
 
-        logits = self.model(images)
+        logits = self.model(images) # regression_logits, cls_logits
         loss   = self.loss_fn(logits, masks)
 
         (loss / self.grad_accum_steps).backward()

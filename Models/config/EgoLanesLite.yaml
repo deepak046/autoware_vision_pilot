@@ -19,6 +19,7 @@ dataset:
 
   #augmentations settings for all datasets
   augmentations:
+    remove_car_hood: true
     normalize:
       enabled: true
       mean: [0.485, 0.456, 0.406]   # imagenet mean, RGB ORDER  
@@ -115,8 +116,11 @@ loss:
 network:
   model: "unetplusplus"    #deeplabv3plus | fcn | unetplusplus
   type: "custom"    #standard uses the smp.deeplabv3plus architecture, custom uses my own integrated implementation (used for loading some weights customly)
-  
-
+  aux_params:
+    classes: 8
+    dropout: 0.1
+    pooling: "avg"    # "avg" | "max"
+    activation: "relu"    # "relu" | "elu" | "leaky_relu" | "tanh" | "sigmoid" | "none"
   #load a pretrained model to use as backbone (also as decoder if specified)
   pretrained_model_path: #"/home/sergey/DEV/AI/AEI/runs/training/segmentation/dlv3plus_efficientnetb1_v2/checkpoints/best_mIoU.pth"     # path to a pretrained model to use as backbone (overrides 'pretrained' flag)
 
@@ -125,7 +129,7 @@ network:
     pretrained: true         # whether to use ImageNet pre-trained weights
     encoder_depth: 5      #the encoder features that will be used in decoder (5 means the last stage before 1x1conv, 4 means the one before that, etc.)
 
-    encoder_partial_load: false      # whether to partially load encoder weights from the pretrained model specified in pretrained_model_path
+    encoder_partial_load: true      # whether to partially load encoder weights from the pretrained model specified in pretrained_model_path
     encoder_partial_depth: 4        # how many stages to load if encoder_partial_load is
     
     output_stride: 8        # 8 or 16

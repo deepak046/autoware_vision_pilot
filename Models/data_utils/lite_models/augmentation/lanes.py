@@ -132,6 +132,7 @@ class LanesAugmentation(BaseAugmentation):
         # --------------------------------------------------
         # Check if HorizontalFlip was applied
         # --------------------------------------------------
+        # TODO: Deepak | If class labels are provided, they have to be flipped too
         flip_applied = False
         for t in out["replay"]["transforms"]:
             if t["__class_fullname__"].endswith("HorizontalFlip") and t["applied"]:
