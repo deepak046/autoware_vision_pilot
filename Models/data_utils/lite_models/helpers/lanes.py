@@ -19,6 +19,28 @@ LANE_COLORS_RGB = {
     "other":    (0, 255, 145),   # green
 }
 
+# 8-class lane taxonomy RGB (must match BaseDataset.LANE_CLASS_RGB_PALETTE / process_curvelanes).
+LANE_CLASS_NAMES_8 = [
+    "continuous_white_line",
+    "continuous_yellow_line",
+    "dashed_white_line",
+    "double_white_lines",
+    "double_yellow_lines",
+    "curb_line",
+    "stop_line",
+    "invisible_line",
+]
+LANE_CLASS_COLORS_RGB_8 = [
+    (240, 240, 240),
+    (0, 255, 255),
+    (200, 200, 200),
+    (220, 220, 220),
+    (0, 220, 255),
+    (0, 140, 255),
+    (0, 0, 255),
+    (128, 128, 128),
+]
+
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
@@ -54,15 +76,14 @@ def _apply_lane_colors_rgb(canvas: np.ndarray, mask3: np.ndarray) -> np.ndarray:
 
     return out
 
-
-def logits_to_lane_mask3(
+def logits_to_lane_maskC(
     logits_chw: torch.Tensor,
-    threshold: float = 0.0,
-    use_sigmoid: bool = False,
+    threshold: float = 0.5,
+    use_sigmoid: bool = True,
 ) -> np.ndarray:
     """
-    logits_chw: [3,H,W]
-    return: HxWx3 bool
+    logits_chw: [C, H, W] — one logit map per lane class.
+    Returns HxWxC bool (independent channels; overlaps possible).
     """
     x = logits_chw.detach()
     if use_sigmoid:
@@ -70,94 +91,138 @@ def logits_to_lane_mask3(
         mask = (x > threshold)
     else:
         mask = (x > threshold)
-
     return mask.permute(1, 2, 0).cpu().numpy().astype(bool)
 
 
-def logits_to_lane_mask3_argmax(
+def logits_to_lane_maskC_argmax(
     logits_chw: torch.Tensor,
     use_sigmoid: bool = True,
 ) -> np.ndarray:
     """
-    Convert logits to a single-class-per-pixel mask using argmax.
-    Use this when the model tends to predict "other" (or any class) with high
-    probability everywhere (e.g. under dice+focal+edge with strong class
-    imbalance); per-channel thresholding would then paint the whole frame one
-    color. Argmax assigns each pixel to exactly one class (the winning channel).
+    Single winning class per pixel (mutually exclusive one-hot HxWx8).
+    logits_chw: [C, H, W]
+    """
+    x = logits_chw.detach()
+    C = int(logits_chw.shape[0])
+    if use_sigmoid:
+        x = torch.sigmoid(x)
+    winner = x.argmax(dim=0)
+    mask = torch.zeros_like(x, dtype=torch.bool)
+    for c in range(C):
+        mask[c] = winner == c
+    return mask.permute(1, 2, 0).cpu().numpy()
 
-    logits_chw: [3,H,W]
-    return: HxWx3 bool (exactly one True per pixel)
+
+def logits_to_lane_class_id_hw(
+    logits_chw: torch.Tensor,
+    use_sigmoid: bool = True,
+) -> np.ndarray:
+    """
+    Per-pixel class index in {0..7} from argmax over channels.
+    Shape [H, W], dtype int64.
     """
     x = logits_chw.detach()
     if use_sigmoid:
         x = torch.sigmoid(x)
-    # [3,H,W] -> [H,W] indices in {0,1,2}
-    winner = x.argmax(dim=0)
-    # one-hot to HxWx3 bool
-    mask = torch.zeros_like(x, dtype=torch.bool)
-    mask[0] = winner == 0
-    mask[1] = winner == 1
-    mask[2] = winner == 2
-    return mask.permute(1, 2, 0).cpu().numpy()
+    return x.argmax(dim=0).cpu().numpy().astype(np.int64)
 
 
-def tensor_mask3_to_numpy(mask3_chw: torch.Tensor, threshold: float = 0.5) -> np.ndarray:
+def apply_lane_colors_rgb_8class(canvas: np.ndarray, mask8: np.ndarray) -> np.ndarray:
     """
-    GT: [3,H,W] -> HxWx3 bool
+    canvas: HxWx3 uint8 RGB
+    mask8: HxWx8 bool — multi-label or one-hot; paints class colors (later indices
+    overwrite earlier on overlaps).
     """
-    m = mask3_chw.detach().cpu().float()
+    out = canvas.copy()
+    if mask8.dtype != np.bool_:
+        if mask8.max() > 1.5:
+            mask8 = mask8 > 127
+        else:
+            mask8 = mask8 > 0.5
+    for i, color in enumerate(LANE_CLASS_COLORS_RGB_8):
+        ys, xs = np.where(mask8[..., i])
+        out[ys, xs, :] = color
+    return out
+
+
+def tensor_maskC_to_numpy(maskC_chw: torch.Tensor, threshold: float = 0.5) -> np.ndarray:
+    """
+    GT: [C,H,W] -> HxWxC bool
+    """
+    m = maskC_chw.detach().cpu().float()
     mask = (m > threshold)
     return mask.permute(1, 2, 0).numpy().astype(bool)
 
 
-def make_lane_vis_pair(
+def make_lane_vis_pair_C_class(
     image_chw: torch.Tensor,
     pred_logits_chw: torch.Tensor,
-    gt_mask3_chw: torch.Tensor,
+    gt_maskC_chw: torch.Tensor,
     *,
     alpha: float = 0.5,
     pred_threshold: float = 0.0,
     pred_use_sigmoid: bool = False,
-    out_size_hw=None,
+    pred_use_argmax: bool = True,
 ):
     """
-    Returns 2x2 tile:
-        [ Pred NORMAL | GT NORMAL ]
-        [ Pred RAW    | GT RAW    ]
-    """
+    Generic 2x2 visualization for multi-class lane heads.
 
+    For C==3: falls back to the existing binary-per-channel (egoleft/egoright/other) visualization.
+    For C==8: uses argmax over channels for a mutually-exclusive mask to avoid
+    painting the whole frame with one class.
+    """
     base_img = denorm_image_chw_to_uint8(image_chw)
     H_img, W_img, _ = base_img.shape
-    Hm, Wm = int(gt_mask3_chw.shape[1]), int(gt_mask3_chw.shape[2])
+    C = int(gt_maskC_chw.shape[0])
+    Hm, Wm = int(gt_maskC_chw.shape[1]), int(gt_maskC_chw.shape[2])
 
     if (H_img != Hm) or (W_img != Wm):
         base_img_small = cv2.resize(base_img, (Wm, Hm), interpolation=cv2.INTER_LINEAR)
     else:
         base_img_small = base_img
 
-    pred_mask3 = logits_to_lane_mask3(
-        pred_logits_chw, threshold=pred_threshold, use_sigmoid=pred_use_sigmoid
-    )
-    gt_mask3 = tensor_mask3_to_numpy(gt_mask3_chw)
+    gt_maskC = tensor_maskC_to_numpy(gt_maskC_chw, threshold=0.5)
 
-    pred_colored = _apply_lane_colors_rgb(base_img_small, pred_mask3)
-    gt_colored   = _apply_lane_colors_rgb(base_img_small, gt_mask3)
+    if C == 3:
+        # logits_to_lane_mask3 expects [3,H,W] and returns bool HxWx3.
+        pred_mask3 = logits_to_lane_maskC(
+            pred_logits_chw, threshold=pred_threshold, use_sigmoid=pred_use_sigmoid
+        )
+        gt_mask3 = gt_maskC  # HxWx3
+        pred_colored = _apply_lane_colors_rgb(base_img_small, pred_mask3)
+        gt_colored = _apply_lane_colors_rgb(base_img_small, gt_mask3)
+    elif C == 8:
+        # TODO: Deepak
+        # if pred_use_argmax:
+        #     pred_mask8 = logits_to_lane_maskC_argmax(
+        #         pred_logits_chw, use_sigmoid=pred_use_sigmoid
+        #     )
+        # else:
+        pred_mask8 = logits_to_lane_maskC(
+            pred_logits_chw,
+            threshold=pred_threshold,
+            use_sigmoid=pred_use_sigmoid,
+        )
+        pred_colored = apply_lane_colors_rgb_8class(base_img_small, pred_mask8)
+        gt_colored = apply_lane_colors_rgb_8class(base_img_small, gt_maskC)
+    else:
+        # Unknown channel count: skip visualization.
+        return np.zeros((Hm * 2, Wm * 2, 3), dtype=np.uint8)
 
     pred_normal = cv2.addWeighted(pred_colored, alpha, base_img_small, 1 - alpha, 0)
-    gt_normal   = cv2.addWeighted(gt_colored,   alpha, base_img_small, 1 - alpha, 0)
+    gt_normal = cv2.addWeighted(gt_colored, alpha, base_img_small, 1 - alpha, 0)
 
     black = np.zeros((Hm, Wm, 3), dtype=np.uint8)
-    pred_raw = _apply_lane_colors_rgb(black, pred_mask3)
-    gt_raw   = _apply_lane_colors_rgb(black, gt_mask3)
+    if C == 3:
+        pred_raw = _apply_lane_colors_rgb(black, pred_mask3)
+        gt_raw = _apply_lane_colors_rgb(black, gt_mask3)
+    else:
+        pred_raw = apply_lane_colors_rgb_8class(black, pred_mask8)
+        gt_raw = apply_lane_colors_rgb_8class(black, gt_maskC)
 
     top = np.concatenate([pred_normal, gt_normal], axis=1)
     bot = np.concatenate([pred_raw, gt_raw], axis=1)
     tile = np.concatenate([top, bot], axis=0)
-
-    if out_size_hw is not None:
-        out_h, out_w = out_size_hw
-        tile = cv2.resize(tile, (out_w, out_h), interpolation=cv2.INTER_NEAREST)
-
     return tile
 
 
@@ -228,43 +293,46 @@ def validate_lanes(
         class_iou_dict (dict)
         vis_images (list[np.ndarray])
     """
+    # TODO: Deepak
 
     model.eval()
     total_loss = 0.0
     num_batches = 0
 
-    # one confusion matrix per channel
-    confmats = [
-        {"TP": 0, "FP": 0, "FN": 0, "TN": 0},  # egoleft
-        {"TP": 0, "FP": 0, "FN": 0, "TN": 0},  # egoright
-        {"TP": 0, "FP": 0, "FN": 0, "TN": 0},  # other
-    ]
-    class_names = ["egoleft", "egoright", "other"]
+    confmats = None  # initialized after first forward (depends on C)
+    class_names = None
 
     vis_images = []
     vis_done = 0
 
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="[Validation Lanes]", leave=False):
-            images = batch["image"].to(device, non_blocking=True)   # [B,3,H,W]
-            gt_full     = batch["gt"].to(device, non_blocking=True)      # [B,3,H',W']
+            images = batch["image"].to(device, non_blocking=True)  # [B,3,H,W]
+            gt_full = batch["gt"].to(device, non_blocking=True)   # [B,C,H',W']
 
-            logits = model(images)                                  # [B,3,H',W']
+            logits = model(images)  # [B,C,H',W']
             loss = loss_fn(logits, gt_full)
 
+            # Channel count
+            C = int(logits.shape[1])
+            if confmats is None:
+                confmats = [{"TP": 0, "FP": 0, "FN": 0, "TN": 0} for _ in range(C)]
+                if C == 3:
+                    class_names = ["egoleft", "egoright", "other"]
+                elif C == 8:
+                    class_names = LANE_CLASS_NAMES_8
+                else:
+                    class_names = [f"class_{i}" for i in range(C)]
 
             # -------------------------------------------------
             # Downsample GT for metrics + visualization
             # -------------------------------------------------
             gt = gt_full.float()
-
-            # downsample with maxpooling the gt n case the downsample factor is different than 1
             for _ in range(loss_fn.downsample_factor // 2):
                 gt = F.max_pool2d(gt, kernel_size=2, stride=2)
 
-            # Binarize
-            gt = (gt > 0.5)
-
+            # Binarize GT per channel
+            gt_bin = gt > 0.5  # [B,C,H',W']
 
             total_loss += float(loss.item())
             num_batches += 1
@@ -272,15 +340,19 @@ def validate_lanes(
             # -------------------------------------------------
             # Metrics
             # -------------------------------------------------
-            preds_bin = (logits > pred_threshold)   # [B,3,H',W'] bool
-            gt_bin    = (gt > 0.5)
+            if pred_use_sigmoid:
+                pred_scores = torch.sigmoid(logits)
+            else:
+                pred_scores = logits
+
+            preds_bin = pred_scores > pred_threshold  # [B,C,H',W']
 
             preds_np = preds_bin.cpu().numpy()
-            gt_np    = gt_bin.cpu().numpy()
+            gt_np = gt_bin.cpu().numpy()
 
             B = preds_np.shape[0]
             for b in range(B):
-                for c in range(3):
+                for c in range(C):
                     update_binary_confmat(
                         confmats[c],
                         pred=preds_np[b, c],
@@ -290,18 +362,18 @@ def validate_lanes(
             # -------------------------------------------------
             # Visuals
             # -------------------------------------------------
-            if vis_done < vis_count:
+            if vis_done < vis_count and C in (3, 8):
                 for b in range(images.shape[0]):
                     if vis_done >= vis_count:
                         break
-
-                    tile = make_lane_vis_pair(
+                    tile = make_lane_vis_pair_C_class(
                         image_chw=images[b],
                         pred_logits_chw=logits[b],
-                        gt_mask3_chw=gt[b],
+                        gt_maskC_chw=gt_bin[b],
                         alpha=alpha,
                         pred_threshold=pred_threshold,
                         pred_use_sigmoid=pred_use_sigmoid,
+                        pred_use_argmax=True if C == 8 else False,
                     )
                     vis_images.append(tile)
                     vis_done += 1
@@ -313,7 +385,6 @@ def validate_lanes(
 
     class_iou = {}
     class_acc = {}
-
     for name, cm in zip(class_names, confmats):
         class_iou[name] = float(compute_iou_from_confmat(cm))
         class_acc[name] = float(compute_pixel_acc_from_confmat(cm))
@@ -321,20 +392,14 @@ def validate_lanes(
     mean_iou = float(np.nanmean(list(class_iou.values())))
     pixel_acc = float(np.nanmean(list(class_acc.values())))
 
-
-    # combine the metrics results into a dict to return 
     results = {
-            "loss": val_loss,
-            "mean_iou": mean_iou,
-            "pixel_acc": pixel_acc,
-            "class_iou": class_iou,
-            "class_acc": class_acc,
-        }
-    
+        "loss": val_loss,
+        "mean_iou": mean_iou,
+        "pixel_acc": pixel_acc,
+        "class_iou": class_iou,
+        "class_acc": class_acc,
+    }
 
-    # -------------------------------------------------
-    # Logging
-    # -------------------------------------------------
     if logger is not None and hasattr(logger, "log_validation_lanes"):
         logger.log_validation_lanes(
             step=step,
@@ -346,9 +411,7 @@ def validate_lanes(
             class_acc=class_acc,
             vis_images=vis_images,
         )
-
         return results
-    
-    #if logger is None, return the results + visualization images (for the evaluation script)
+
     return results, vis_images
     

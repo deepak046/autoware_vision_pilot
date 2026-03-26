@@ -12,6 +12,33 @@ from PIL import Image, ImageDraw
 
 # ============================= Format functions ============================= #
 
+# Lane taxonomy (matches LabelMe / convert_labelme_to_curvelanes .lines.json).
+LANE_CLASSES = [
+    "continuous_white_line",
+    "continuous_yellow_line",
+    "dashed_white_line",
+    "double_white_lines",
+    "double_yellow_lines",
+    "curb_line",
+    "stop_line",
+    "invisible_line",
+]
+LANE_CLASS_TO_ID = {name: i for i, name in enumerate(LANE_CLASSES)}
+# RGB colors for semantic id 1..8 (background 0 = black)
+LANE_CLASS_SEMANTIC_RGB = [
+    (240, 240, 240),
+    (0, 255, 255),
+    (200, 200, 200),
+    (220, 220, 220),
+    (0, 220, 255),
+    (0, 140, 255),
+    (0, 0, 255),
+    (128, 128, 128),
+]
+
+# Default interpolation density when lines have few points (used by parseAnnotations).
+LINE_INTERP_THRESHOLD = 5
+
 
 def round_line_floats(line, ndigits = 6):
     line = list(line)
@@ -272,6 +299,59 @@ def calcLaneSegMask(
     return bin_seg
 
 
+def _resolve_line_label(i, payload):
+    """Line i class name from LineLabels or LineClassIds (+ optional LaneClassMap)."""
+    line_labels = payload.get("LineLabels") or []
+    line_class_ids = payload.get("LineClassIds") or []
+    lane_class_map = payload.get("LaneClassMap") or {}
+
+    if i < len(line_labels) and str(line_labels[i]).strip():
+        return str(line_labels[i]).strip()
+    if i < len(line_class_ids):
+        cid = line_class_ids[i]
+        if isinstance(cid, int) and 0 <= cid < len(LANE_CLASSES):
+            return LANE_CLASSES[cid]
+        if isinstance(cid, str) and cid.strip() in LANE_CLASS_TO_ID:
+            return cid.strip()
+    if isinstance(lane_class_map, dict) and lane_class_map and i < len(line_class_ids):
+        cid = line_class_ids[i]
+        for name, idx in lane_class_map.items():
+            if int(idx) == int(cid):
+                return str(name).strip()
+    return "invisible_line"
+
+
+def semantic_id_map_to_rgb(id_map: np.ndarray) -> np.ndarray:
+    """H,W uint8 with values 0..8 -> H,W,3 RGB for visualization."""
+    h, w = id_map.shape
+    rgb = np.zeros((h, w, 3), dtype=np.uint8)
+    for cid in range(1, 9):
+        m = id_map == cid
+        rgb[m] = LANE_CLASS_SEMANTIC_RGB[cid - 1]
+    return rgb
+
+
+def build_semantic_lane_mask(lines, labels, width, height):
+    """
+    H,W uint8: 0 = background, 1..8 = lane class index + 1 (order matches LANE_CLASSES).
+    Later-drawn lanes overwrite earlier pixels on overlap.
+    """
+    if len(lines) != len(labels):
+        raise ValueError("lines and labels length mismatch")
+    out = np.zeros((height, width), dtype=np.uint8)
+    order = sorted(
+        range(len(lines)),
+        key=lambda i: (LANE_CLASS_TO_ID.get(labels[i], 7), i),
+    )
+    for i in order:
+        line = lines[i]
+        lab = labels[i]
+        cid = LANE_CLASS_TO_ID.get(lab, 7) + 1
+        binm = calcLaneSegMask([line], width, height, normalized=False)
+        out = np.where(binm > 0, np.uint8(cid), out)
+    return out
+
+
 def annotateGT(
         raw_img, anno_entry,
         raw_dir, mask_dir, visualization_dir,
@@ -359,12 +439,13 @@ def annotateGT(
     #     drivable_renormed = anno_entry["drivable_path"]
     # draw.line(drivable_renormed, fill = lane_colors["drive_path_yellow"], width = lane_w)
 
-    # Fetch seg mask as RGB
-    mask_array = np.array(
-        anno_entry["mask"], 
-        dtype = np.uint8
-    )
-    mask_img = Image.fromarray(mask_array).convert("RGB")
+    # Fetch seg mask: HxW class ids (0..8) or legacy HxWx3
+    mask_array = np.array(anno_entry["mask"], dtype=np.uint8)
+    if mask_array.ndim == 2:
+        mask_rgb = semantic_id_map_to_rgb(mask_array)
+        mask_img = Image.fromarray(mask_rgb)
+    else:
+        mask_img = Image.fromarray(mask_array).convert("RGB")
 
     # Save mask (PNG, lossless)
     mask_img.save(os.path.join(mask_dir, save_name + ".png"))
@@ -391,152 +472,107 @@ def parseAnnotations(
         verbose: bool = False
     ):
     """
-    Parses line annotations from raw img + anno files, then extracts normalized GT data.
+    Parses .lines.json annotations into per-class polylines and a semantic mask.
+
+    Expects JSON with ``Lines`` and optionally ``LineLabels`` / ``LineClassIds`` /
+    ``LaneClassMap`` (as produced by convert_labelme_to_curvelanes). Without
+    class fields, lanes are assigned to ``invisible_line``.
+
+    Returns:
+        ``lanes_by_class``: dict mapping each of ``LANE_CLASSES`` to a list of
+        normalized polylines (may be empty).
+        ``mask``: uint8 array (H, W) with values 0..8 (background + 8 classes).
     """
-    # Read each line of GT text file as JSON
     with open(anno_path, "r") as f:
-        read_data = json.load(f)["Lines"]
-        if (len(read_data) < 2):    # Some files are empty, or having less than 2 lines
-            if (verbose):
-                warnings.warn(f"Parsing {anno_path} : insufficient line amount: {len(read_data)} in raw data. Skipping this frame.")
-            return None
-        else:
-            # Parse data from those JSON lines, also sort by y
-            lines = [
-                sorted([(float(point["x"]), float(point["y"])) for point in line],
-                    key = lambda x: x[1], 
-                    reverse = True
+        payload = json.load(f)
+    read_data = payload.get("Lines", [])
+    if len(read_data) < 1:
+        if verbose:
+            warnings.warn(
+                f"Parsing {anno_path}: no lines in raw data. Skipping this frame."
+            )
+        return None
+
+    lines = []
+    labels = []
+    for i, line in enumerate(read_data):
+        lab = _resolve_line_label(i, payload)
+        if lab not in LANE_CLASS_TO_ID:
+            lab = "invisible_line"
+        sorted_line = sorted(
+            [(float(point["x"]), float(point["y"])) for point in line],
+            key=lambda x: x[1],
+            reverse=True,
+        )
+        lines.append(sorted_line)
+        labels.append(lab)
+
+    for i in range(len(lines)):
+        if len(lines[i]) < LINE_INTERP_THRESHOLD:
+            lines[i] = interpLine(lines[i], LINE_INTERP_THRESHOLD)
+
+    new_img_height = init_img_height
+    new_img_width = init_img_width
+
+    if resize:
+        new_img_height = int(new_img_height * resize)
+        new_img_width = int(new_img_width * resize)
+        lines = [
+            [(x * resize, y * resize) for (x, y) in line]
+            for line in lines
+        ]
+
+    if crop:
+        CROP_TOP = crop["TOP"]
+        CROP_RIGHT = crop["RIGHT"]
+        CROP_BOTTOM = crop["BOTTOM"]
+        CROP_LEFT = crop["LEFT"]
+        cropped_lines = []
+        cropped_labels = []
+        for line, lab in zip(lines, labels):
+            clipped = [
+                (x - CROP_LEFT, y - CROP_TOP)
+                for x, y in line
+                if (
+                    (CROP_LEFT <= x <= (new_img_width - CROP_RIGHT))
+                    and (CROP_TOP <= y <= (new_img_height - CROP_BOTTOM))
                 )
-                for line in read_data
             ]
+            if len(clipped) >= 2:
+                cropped_lines.append(clipped)
+                cropped_labels.append(lab)
+        lines = cropped_lines
+        labels = cropped_labels
+        new_img_height -= CROP_TOP + CROP_BOTTOM
+        new_img_width -= CROP_LEFT + CROP_RIGHT
 
-            # Interpolate each line in case it has too few points
-            for i in range(len(lines)):
-                if (len(lines[i]) < LINE_INTERP_THRESHOLD):
-                    lines[i] = interpLine(lines[i], LINE_INTERP_THRESHOLD)
-
-            new_img_height = init_img_height
-            new_img_width = init_img_width
-
-            # Handle image resizing
-            if (resize):
-                new_img_height = int(new_img_height * resize)
-                new_img_width = int(new_img_width * resize)
-                lines = [[
-                    (x * resize, y * resize) 
-                    for (x, y) in line
-                ] for line in lines]
-
-            # Handle image cropping
-            if (crop):
-                CROP_TOP = crop["TOP"]
-                CROP_RIGHT = crop["RIGHT"]
-                CROP_BOTTOM = crop["BOTTOM"]
-                CROP_LEFT = crop["LEFT"]
-                # Crop
-                lines = [[
-                    (x - CROP_LEFT, y - CROP_TOP) for x, y in line
-                    if (
-                        (CROP_LEFT <= x <= (new_img_width - CROP_RIGHT)) and 
-                        (CROP_TOP <= y <= (new_img_height - CROP_BOTTOM))
-                    )
-                ] for line in lines]
-                new_img_height -= (CROP_TOP + CROP_BOTTOM)
-                new_img_width -= (CROP_LEFT + CROP_RIGHT)
-            
-            # Remove empty lanes
-            lines = [line for line in lines if (line and len(line) >= 2)]   # Pick lines with >= 2 points
-            if (len(lines) < 2):    # Ignore frames with less than 2 lines
-                if (verbose):
-                    warnings.warn(f"Parsing {anno_path}: insufficient line amount after cropping: {len(lines)}. Skipping this frame.")
-                return None
-            
-            # Determine 2 ego lines via line anchors
-
-            # First get the anchors
-            # Here I attach index i before each anchor to support retracking after sort by x-coord)
-            line_anchors = sorted(
-                [
-                    (i, getLineAnchor(line, new_img_height)) 
-                    for i, line in enumerate(lines)
-                ],
-                key = lambda x : x[1][0],
-                reverse = False
+    if len(lines) < 1:
+        if verbose:
+            warnings.warn(
+                f"Parsing {anno_path}: no lines left after cropping. Skipping this frame."
             )
-                
-            # Sort the lines by order of their corresponding anchors (which is also sorted)
-            lines_sortedBy_anchor = [
-                [(anchor[1][0], new_img_height)] + lines[anchor[0]]
-                for anchor in line_anchors
+        return None
+
+    lanes_by_class = {c: [] for c in LANE_CLASSES}
+    for line, lab in zip(lines, labels):
+        if lab not in LANE_CLASS_TO_ID:
+            lab = "invisible_line"
+        lanes_by_class[lab].append(line)
+
+    mask = build_semantic_lane_mask(lines, labels, new_img_width, new_img_height)
+
+    anno_data = {
+        "lanes_by_class": {
+            c: [
+                normalizeCoords(line, new_img_width, new_img_height)
+                for line in lanes_by_class[c]
             ]
+            for c in LANE_CLASSES
+        },
+        "mask": mask,
+    }
 
-            ego_indexes = getEgoIndexes(
-                [anchor[1] for anchor in line_anchors],
-                new_img_width
-            )
-
-            if (type(ego_indexes) is str):
-                if (ego_indexes.startswith("NO")) and (verbose):
-                    warnings.warn(f"Parsing {anno_path}: {ego_indexes}")
-                return None
-
-            left_ego = lines_sortedBy_anchor[ego_indexes[0]]
-            right_ego = lines_sortedBy_anchor[ego_indexes[1]]
-            others = [
-                line for i, line in enumerate(lines_sortedBy_anchor)
-                if i not in ego_indexes
-            ]
-
-            # Create segmentation masks:
-            # Channel 1: egoleft lane
-            # Channel 2: egoright lane
-            # Channel 3: other lanes
-            mask = np.zeros(
-                (new_img_height, new_img_width, 3), 
-                dtype = np.uint8
-            )
-            mask[:, :, 0] = calcLaneSegMask(
-                [left_ego], 
-                new_img_width, new_img_height, 
-                normalized = False
-            )
-            mask[:, :, 1] = calcLaneSegMask(
-                [right_ego], 
-                new_img_width, new_img_height, 
-                normalized = False
-            )
-            mask[:, :, 2] = calcLaneSegMask(
-                others, 
-                new_img_width, new_img_height, 
-                normalized = False
-            )
-
-            # # Determine drivable path from 2 egos, and switch on interp cuz this is CurveLanes
-            # drivable_path = getDrivablePath(
-            #     left_ego, right_ego,
-            #     new_img_height,
-            #     y_coords_interp = True
-            # )
-
-            # if (type(drivable_path) is str):
-            #     warnings.warn(f"Parsing {anno_path}: {drivable_path}")
-            # else:
-                
-            # Parse processed data, all coords normalized
-            anno_data = {
-                "others" : [
-                    normalizeCoords(line, new_img_width, new_img_height) 
-                    for line in others
-                ],
-                # "ego_indexes" : ego_indexes,
-                # "drivable_path" : normalizeCoords(drivable_path, new_img_width, new_img_height),
-                "egoleft_lane" : normalizeCoords(left_ego, new_img_width, new_img_height),
-                "egoright_lane" : normalizeCoords(right_ego, new_img_width, new_img_height),
-                "mask" : mask
-
-            }
-
-            return anno_data
+    return anno_data
 
 
 if __name__ == "__main__":
@@ -553,6 +589,7 @@ if __name__ == "__main__":
         "beeg" : (2560, 1440),
         "half_beeg" : (1280, 720),
         "weird" : (1570, 660),
+        "normal" : (1920, 1080),
     }
 
     # ========================= Target resolution =========================
@@ -584,9 +621,17 @@ if __name__ == "__main__":
         "LEFT": 273,
     }
 
+    # After resize(0.75): 1920x1080 -> 1440x810
+    # 1440x810 -> 1024x640
+    #   width : remove 416 -> 208 left / 208 right
+    #   height: remove 170  -> 85 top / 85 bottom
+    CROP_NORMAL = {
+        "TOP": 85,
+        "RIGHT": 208,
+        "BOTTOM": 85,
+        "LEFT": 208,
+    }
 
-    # For interping lines with soooooooo few points, 2~3 or so
-    LINE_INTERP_THRESHOLD = 5
 
     # ============================== Parsing args ============================== #
 
@@ -701,6 +746,9 @@ if __name__ == "__main__":
                 elif (init_img_size == SIZE_DICT["weird"]):
                     resize = None
                     crop = CROP_WEIRD
+                elif (init_img_size == SIZE_DICT["normal"]):
+                    resize = 0.75
+                    crop = CROP_NORMAL
 
                 anno_path = img_path.replace(".jpg", ".lines.json").replace(IMG_DIR, LABEL_DIR)
 
@@ -728,9 +776,10 @@ if __name__ == "__main__":
                     # Save as 6-digit incremental index
                     img_index = str(str(img_id_counter).zfill(6))
                     data_master[img_index] = {}
-                    # data_master[img_index]["drivable_path"] = round_line_floats(this_data["drivable_path"])
-                    data_master[img_index]["egoleft_lane"] = round_line_floats(this_data["egoleft_lane"])
-                    data_master[img_index]["egoright_lane"] = round_line_floats(this_data["egoright_lane"])
+                    for c in LANE_CLASSES:
+                        data_master[img_index][c] = [
+                            round_line_floats(line) for line in this_data["lanes_by_class"][c]
+                        ]
 
                     # Early stopping, it defined
                     if (early_stopping and img_id_counter >= early_stopping - 1):

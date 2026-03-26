@@ -4,6 +4,12 @@ Lite ego-lanes inference script.
 This mirrors the lite training stack (`LiteTrainerBase` + `EgoLanesLiteTrainer`)
 but only builds the model, loads a checkpoint, and runs inference on images.
 
+Head output shapes:
+  - 3 channels: legacy egoleft / egoright / other visualization.
+  - 8 channels: lane classes (order matches `helpers.lanes.LANE_CLASS_NAMES_8`);
+    default is argmax per pixel + sigmoid; use ``--lane8-no-argmax`` for
+    independent per-channel thresholds.
+
 Usage (from repository root):
 
     python -m Models.inference.ego_lanes_infer \\
@@ -28,9 +34,13 @@ from torchvision import transforms
 
 from Models.data_utils.lite_models.helpers.lanes import (
     _apply_lane_colors_rgb,
+    apply_lane_colors_rgb_8class,
     denorm_image_chw_to_uint8,
+    logits_to_lane_class_id_hw,
     logits_to_lane_mask3_argmax,
     logits_to_lane_mask3,
+    logits_to_lane_mask8,
+    logits_to_lane_mask8_argmax,
 )
 from Models.data_utils.lite_models.helpers.training import load_yaml, set_global_seed
 from Models.training.lite_trainer_base import LiteTrainerBase
@@ -152,6 +162,19 @@ def run_inference(
                 tile = np.concatenate([base_img, pred_overlay], axis=1)
                 vis_path = os.path.join(output_dir, f"{base}_vis.png")
                 cv2.imwrite(vis_path, cv2.cvtColor(tile, cv2.COLOR_RGB2BGR))
+            elif pred_logits_chw.shape[0] == 8:
+                # 8-class lane taxonomy (same order as LANE_CLASS_NAMES_8)
+                base_img = denorm_image_chw_to_uint8(image_chw)
+                pred_mask8 = logits_to_lane_mask8(
+                    pred_logits_chw,
+                    threshold=0.0,
+                    use_sigmoid=False,
+                )
+                pred_colored = apply_lane_colors_rgb_8class(base_img, pred_mask8)
+                pred_overlay = cv2.addWeighted(pred_colored, 0.5, base_img, 0.5, 0)
+                tile = np.concatenate([base_img, pred_overlay], axis=1)
+                vis_path = os.path.join(output_dir, f"{base}_vis.png")
+                cv2.imwrite(vis_path, cv2.cvtColor(tile, cv2.COLOR_RGB2BGR))
             else:
                 # Fallback for non-3-channel output
                 seg = logits_np.squeeze()
@@ -225,6 +248,14 @@ def run_inference_video(
                 pred_colored = _apply_lane_colors_rgb(base_img, pred_mask3)
                 # Only the processed (overlay) image in the video
                 tile_rgb = cv2.addWeighted(pred_colored, 0.5, base_img, 0.5, 0)
+            elif pred_logits_chw.shape[0] == 8:
+                base_img = denorm_image_chw_to_uint8(image_chw)
+                pred_mask8 = logits_to_lane_mask8(
+                    pred_logits_chw, threshold=0.0, use_sigmoid=False
+                )
+                pred_colored = apply_lane_colors_rgb_8class(base_img, pred_mask8)
+                # Only the processed (overlay) image in the video
+                tile_rgb = cv2.addWeighted(pred_colored, 0.5, base_img, 0.5, 0)         
             else:
                 seg = logits.squeeze(0).detach().cpu().numpy()
                 if seg.ndim == 3:
@@ -325,7 +356,10 @@ def main() -> None:
         raise RuntimeError("Please specify only one of --input_dir or --input_video.")
 
     if args.input_video is not None:
-        run_inference_video(infer_model, args.input_video, args.output_dir)
+        run_inference_video(
+            infer_model,
+            args.input_video,
+            args.output_dir)
     elif args.input_dir is not None:
         image_paths = list_images(args.input_dir)
         if not image_paths:

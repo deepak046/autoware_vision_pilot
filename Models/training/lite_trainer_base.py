@@ -99,7 +99,7 @@ class LiteTrainerBase(ABC):
                 freeze_decoder=self.decoder_cfg.get("freeze_decoder", False),
                 encoder_depth=self.backbone_cfg.get("encoder_depth", 5),
                 aux_params=self.network_cfg.get("aux_params", None),
-                # bottleneck=self.bottleneck_cfg.get("type", "none"),
+                bottleneck=self.bottleneck_cfg.get("type", "none"),
                 encoder_partial_load=self.backbone_cfg.get("encoder_partial_load", False),
                 encoder_partial_depth=self.backbone_cfg.get("encoder_partial_depth", 4),
                 head_activation=self.network_cfg.get("head_activation", None),       #activation function after each convolutional layer in the regression head (except the last one)
@@ -351,6 +351,7 @@ class LiteTrainerBase(ABC):
 
         self.backbone_cfg = self.network_cfg.get("backbone", {})
         self.decoder_cfg = self.network_cfg.get("decoder", {})
+        self.bottleneck_cfg = self.network_cfg.get("bottleneck", {})
         self.head_cfg = self.network_cfg.get("head", {})
         
         #modify the name of the backbone type from efficientnet_b0 to timm-efficientnet-b0

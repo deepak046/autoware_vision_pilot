@@ -13,13 +13,15 @@ checkpoint:
 
 dataset:
   training_sets: ["curvelanes"]    # <--- LIST OF DATASETS TO USE FOR TRAIN
-  curvelanes_root: "/home/new_user/Desktop/shared-data/Line/Training/Train_Lane_Detection/curvelane_Line_Annotations_New"
+  curvelanes_root: "/home/deepak/Desktop/qtpie/lane_detection_classification/autoware_vision_pilot/data/" 
+  #"/home/new_user/Desktop/shared-data/Line/Training/Train_Lane_Detection/curvelane_Line_Annotations_New"
 
   validation_sets: ["curvelanes"]    # <--- LIST OF DATASETS TO USE FOR VALIDATION
 
   #augmentations settings for all datasets
   augmentations:
-    remove_car_hood: true
+    remove_car_hood: false
+    output_channels: 8
     normalize:
       enabled: true
       mean: [0.485, 0.456, 0.406]   # imagenet mean, RGB ORDER  
@@ -65,8 +67,8 @@ dataset:
 
 
 dataloader:
-  batch_size: 4             # how many samples per optimization step
-  num_workers: 4            # how many workers for data loading
+  batch_size: 2             # how many samples per optimization step
+  num_workers: 2            # how many workers for data loading
   pin_memory: true          # pin memory for dataloader
   persistent_workers: true  # keep workers alive between epochs
   drop_last: true           # drop last incomplete batch
@@ -116,11 +118,11 @@ loss:
 network:
   model: "unetplusplus"    #deeplabv3plus | fcn | unetplusplus
   type: "custom"    #standard uses the smp.deeplabv3plus architecture, custom uses my own integrated implementation (used for loading some weights customly)
-  aux_params:
-    classes: 8
-    dropout: 0.1
-    pooling: "avg"    # "avg" | "max"
-    activation: "relu"    # "relu" | "elu" | "leaky_relu" | "tanh" | "sigmoid" | "none"
+  # aux_params:
+  #   classes: 8
+  #   dropout: 0.1
+  #   pooling: "avg"    # "avg" | "max"
+  #   activation: "relu"    # "relu" | "elu" | "leaky_relu" | "tanh" | "sigmoid" | "none"
   #load a pretrained model to use as backbone (also as decoder if specified)
   pretrained_model_path: #"/home/sergey/DEV/AI/AEI/runs/training/segmentation/dlv3plus_efficientnetb1_v2/checkpoints/best_mIoU.pth"     # path to a pretrained model to use as backbone (overrides 'pretrained' flag)
 
@@ -140,7 +142,7 @@ network:
 
   bottleneck:
     #used to better map the backbone features to the decoder input
-    type : "none"   # "none" | "fcn" | "fcn_cbam" | "fcn_skip" | "fcn_skip_cbam"
+    type : "fcn_skip_cbam"   # "none" | "fcn" | "fcn_cbam" | "fcn_skip" | "fcn_skip_cbam"
     #number of channels is the same of the backbone output channels
 
   decoder:
@@ -163,4 +165,4 @@ network:
     head_upsampling: 4
     head_kernel_size: 3
 
-  output_channels: 3
+  output_channels: 8

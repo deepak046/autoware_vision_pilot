@@ -86,9 +86,9 @@ class LanesAugmentation(BaseAugmentation):
             else:
                 raise ValueError(f"Unknown lane detection mode: {mode}")
 
-            flip_p = float(self.cfg.get("flip_prob", 0.0))
-            if flip_p > 0:
-                tfs.append(A.HorizontalFlip(p=flip_p))
+            # flip_p = float(self.cfg.get("flip_prob", 0.0))
+            # if flip_p > 0:
+            #     tfs.append(A.HorizontalFlip(p=flip_p))
 
         else:
             # validation / test
@@ -128,25 +128,25 @@ class LanesAugmentation(BaseAugmentation):
         out = self.transform(image=image, mask=label)
         image, label = out["image"], out["mask"]
 
-        #check if flip has been applied. if so, swap the lane labels for class0 and class1 (left -> right, right --> left)
-        # --------------------------------------------------
-        # Check if HorizontalFlip was applied
-        # --------------------------------------------------
-        # TODO: Deepak | If class labels are provided, they have to be flipped too
-        flip_applied = False
-        for t in out["replay"]["transforms"]:
-            if t["__class_fullname__"].endswith("HorizontalFlip") and t["applied"]:
-                flip_applied = True
-                break
+        # #check if flip has been applied. if so, swap the lane labels for class0 and class1 (left -> right, right --> left)
+        # # --------------------------------------------------
+        # # Check if HorizontalFlip was applied
+        # # --------------------------------------------------
+        # # TODO: Deepak | If class labels are provided, they have to be flipped too
+        # flip_applied = False
+        # for t in out["replay"]["transforms"]:
+        #     if t["__class_fullname__"].endswith("HorizontalFlip") and t["applied"]:
+        #         flip_applied = True
+        #         break
 
-        # --------------------------------------------------
-        # If flipped → swap left/right channels
-        # --------------------------------------------------
-        if flip_applied:
-            # label shape is [H, W, 3] at this stage
-            label = label.copy()
-            label[..., [0, 1]] = label[..., [1, 0]]
-            # print("[LanesAugmentation] Applied HorizontalFlip, swapped left/right lane channels.")
+        # # --------------------------------------------------
+        # # If flipped → swap left/right channels
+        # # --------------------------------------------------
+        # if flip_applied:
+        #     # label shape is [H, W, 3] at this stage
+        #     label = label.copy()
+        #     label[..., [0, 1]] = label[..., [1, 0]]
+        #     # print("[LanesAugmentation] Applied HorizontalFlip, swapped left/right lane channels.")
 
 
         # 3) noise + normalize (image only)

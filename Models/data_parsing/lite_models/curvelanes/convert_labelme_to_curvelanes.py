@@ -25,7 +25,172 @@ ROW_ANCHOR_STEP = 10
 DEDUP_THRESHOLD = 30
 MERGE_Y_GAP = 100
 MERGE_X_DIFF = 80
-SKIP_LABELS = {"stop_line"}
+
+# Stable lane taxonomy for class assignment (requested).
+LANE_CLASSES = [
+    "continuous_white_line",   # 0
+    "continuous_yellow_line",  # 1
+    "dashed_white_line",       # 2
+    "double_white_lines",      # 3
+    "double_yellow_lines",     # 4
+    "curb_line",               # 5
+    "stop_line",               # 6
+    "invisible_line",          # 7
+]
+
+LANE_CLASS_TO_ID = {name: idx for idx, name in enumerate(LANE_CLASSES)}
+
+# BGR debug colors (keys match exact JSON label strings in LANE_CLASSES).
+LANE_CLASS_COLOR_BGR = {
+    "continuous_white_line": (240, 240, 240),
+    "continuous_yellow_line": (0, 255, 255),
+    "dashed_white_line": (200, 200, 200),
+    "double_white_lines": (220, 220, 220),
+    "double_yellow_lines": (0, 220, 255),
+    "curb_line": (0, 140, 255),
+    "stop_line": (0, 0, 255),
+    "invisible_line": (128, 128, 128),
+}
+
+
+def bgr_color_for_lane_label(label):
+    key = str(label).strip()
+    if key in LANE_CLASS_COLOR_BGR:
+        return LANE_CLASS_COLOR_BGR[key]
+    h = abs(hash(key))
+    return (h & 255, (h >> 8) & 255, (h >> 16) & 255)
+
+
+def _debug_overlay_text(slot, class_label):
+    short = str(class_label).strip() if class_label else ""
+    if len(short) > 22:
+        short = short[:21] + "~"
+    if slot is not None:
+        return f"{slot}:{short}" if short else str(slot)
+    return short or "?"
+
+# Thickness modulation: boost lanes near image center.
+LANE_THICKNESS_MAX_EXTRA = 10  # pixels added at image center (keeps boundary lanes unchanged)
+LANE_THICKNESS_CENTER_BAND = 0.45  # fraction of half-width; outside band -> no boost
+
+# Boundary curb filtering: if two boundary lanes are close and one is curb, keep curb only.
+BOUNDARY_EDGE_MARGIN_FRAC = 0.18  # left/right edge zone (fraction of image width)
+BOUNDARY_CLOSE_X_THRESH_PX = 45   # pixels; "very close" at boundary
+
+# Stop lines are ~horizontal. Slot assignment uses only ks_theta < 0 vs > 0, so theta≈0 is
+# dropped; a slight tilt can make theta slightly negative/positive and the polyline may then
+# land in k_neg or k_pos (fragile). Shapes labeled "stop_line" are always drawn via
+# draw_stop_line_on_mask instead of the slot path.
+STOP_LINE_MASK_VALUE = 255
+STOP_LINE_DRAW_THICKNESS = 18
+
+
+def _canonical_label(shape: dict) -> str:
+    """Label strings in JSON are treated as exact class names (see LANE_CLASSES)."""
+    return str(shape.get("label", "")).strip()
+
+
+def is_stop_line_shape(shape: object) -> bool:
+    if not isinstance(shape, dict):
+        return False
+    if _canonical_label(shape) in SKIP_LABELS:
+        return False
+    return _canonical_label(shape) == "stop_line"
+
+
+def _lane_mean_x(points) -> float:
+    pts = np.array(points, dtype=np.float32)
+    if pts.size == 0:
+        return float("nan")
+    return float(np.mean(pts[:, 0]))
+
+def filter_boundary_close_lanes_keep_curb(shapes, img_width: int):
+    """
+    If there are 2 very close lanes on the boundary and one is a curb_line,
+    keep the curb_line lane and remove the other.
+    """
+    if not shapes:
+        return shapes
+
+    edge_margin = int(img_width * BOUNDARY_EDGE_MARGIN_FRAC)
+    left_edge = edge_margin
+    right_edge = img_width - edge_margin
+
+    entries = []
+    for idx, shape in enumerate(shapes):
+        if not isinstance(shape, dict):
+            continue
+        label = shape.get("label", "")
+        if label in SKIP_LABELS:
+            continue
+        pts = shape.get("points", [])
+        if not isinstance(pts, list) or len(pts) < 2:
+            continue
+        mx = _lane_mean_x(pts)
+        if not np.isfinite(mx):
+            continue
+        if mx <= left_edge:
+            side = "left"
+        elif mx >= right_edge:
+            side = "right"
+        else:
+            side = None
+        lane_class = str(label).strip()
+        entries.append(
+            {
+                "idx": idx,
+                "shape": shape,
+                "mean_x": mx,
+                "side": side,
+                "lane_class": lane_class,
+            }
+        )
+
+    keep = [True] * len(shapes)
+
+    for side in ("left", "right"):
+        side_entries = [e for e in entries if e["side"] == side]
+        side_entries.sort(key=lambda e: e["mean_x"])
+        for a, b in zip(side_entries, side_entries[1:]):
+            if abs(a["mean_x"] - b["mean_x"]) > BOUNDARY_CLOSE_X_THRESH_PX:
+                continue
+            # Do not drop stop_line when paired with curb (different semantics).
+            if a["lane_class"] == "stop_line" or b["lane_class"] == "stop_line":
+                continue
+            a_is_curb = a["lane_class"] == "curb_line"
+            b_is_curb = b["lane_class"] == "curb_line"
+            if a_is_curb and not b_is_curb:
+                keep[b["idx"]] = False
+            elif b_is_curb and not a_is_curb:
+                keep[a["idx"]] = False
+
+    return [s for i, s in enumerate(shapes) if keep[i]]
+
+
+def lane_thickness_for_points(points, img_width: int, base: int) -> int:
+    """
+    Increase thickness for lanes close to the center of the image,
+    keep boundary lanes at the base thickness.
+    """
+    mx = _lane_mean_x(points)
+    if not np.isfinite(mx) or img_width <= 0:
+        return int(base)
+
+    edge_margin = img_width * BOUNDARY_EDGE_MARGIN_FRAC
+    if mx <= edge_margin or mx >= (img_width - edge_margin):
+        return int(base)
+
+    half_w = img_width / 2.0
+    if half_w <= 1e-6:
+        return int(base)
+
+    d = abs(mx - half_w) / half_w  # 0 at center, 1 at edges
+    if d >= LANE_THICKNESS_CENTER_BAND:
+        return int(base)
+
+    # Linear boost within the center band.
+    boost = (1.0 - (d / LANE_THICKNESS_CENTER_BAND)) * float(LANE_THICKNESS_MAX_EXTRA)
+    return int(max(1, round(base + boost)))
 
 
 def _fit_degree(n_points, max_deg=3):
@@ -265,35 +430,46 @@ def spline_at_anchors(points, row_anchors):
 
     return result
 
-def draw_lane_on_mask(mask, points, lane_idx):
+def draw_lane_on_mask(mask, points, lane_idx, img_width: int):
     """Draw a lane polyline on the segmentation mask with pixel value = lane_idx."""
     pts = interpolate_points(points)
+    thickness = lane_thickness_for_points(pts, img_width=img_width, base=LANE_DRAW_WIDTH)
     for i in range(len(pts) - 1):
         pt0 = (int(pts[i, 0]), int(pts[i, 1]))
         pt1 = (int(pts[i + 1, 0]), int(pts[i + 1, 1]))
-        cv2.line(mask, pt0, pt1, (lane_idx,), thickness=LANE_DRAW_WIDTH)
+        cv2.line(mask, pt0, pt1, (lane_idx,), thickness=thickness)
 
 
-LANE_COLORS = [
-    (255, 0, 0),      # slot 0 — blue
-    (0, 255, 0),      # slot 1 — green
-    (0, 0, 255),      # slot 2 — red
-    (255, 255, 0),    # slot 3 — cyan
-    (255, 0, 255),    # slot 4 — magenta
-    (0, 255, 255),    # slot 5 — yellow
-    (128, 128, 255),  # slot 6+
-    (128, 255, 128),
-]
-
-
-def draw_debug_image(img, bin_label, all_points, row_anchors, slot_raw_pts=None):
+def draw_stop_line_on_mask(mask, points, img_width: int) -> None:
     """
-    Draw processed lanes on a copy of the source image.  Each active slot
-    is drawn in a distinct color with the slot index rendered as text near
-    the lane midpoint.  If slot_raw_pts is provided, the original annotation
-    points are drawn as circles so you can see what the curve was fitted to.
+    Draw stop lines on the seg mask without using calc_k / slot assignment.
+    Horizontal polylines are skipped by k_neg/k_pos (theta≈0); this path always draws them.
+    """
+    pts = interpolate_points(points)
+    if len(pts) < 2:
+        return
+    thickness = max(STOP_LINE_DRAW_THICKNESS, LANE_DRAW_WIDTH)
+    for i in range(len(pts) - 1):
+        pt0 = (int(pts[i, 0]), int(pts[i, 1]))
+        pt1 = (int(pts[i + 1, 0]), int(pts[i + 1, 1]))
+        cv2.line(mask, pt0, pt1, (STOP_LINE_MASK_VALUE,), thickness=thickness)
+
+def draw_debug_image(
+    img,
+    bin_label,
+    all_points,
+    row_anchors,
+    slot_raw_pts=None,
+    slot_labels=None,
+    shapes=None,
+):
+    """
+    Draw lanes on a copy of the image. Line color follows the lane class label string.
+    Overlay text is ``slot:class_name``. If ``shapes`` is set, ``stop_line`` polylines
+    are drawn too (they are not assigned to slots).
     """
     vis = img.copy()
+    slot_labels = slot_labels or {}
 
     for slot in range(len(bin_label)):
         if not bin_label[slot]:
@@ -303,18 +479,14 @@ def draw_debug_image(img, bin_label, all_points, row_anchors, slot_raw_pts=None)
         if not np.any(valid):
             continue
 
-        color = LANE_COLORS[slot % len(LANE_COLORS)]
+        class_label = slot_labels.get(slot)
+        color = bgr_color_for_lane_label(class_label) if class_label else (180, 180, 180)
         valid_pts = pts[valid].astype(np.int32)
 
         for k in range(len(valid_pts) - 1):
             pt0 = tuple(valid_pts[k])
             pt1 = tuple(valid_pts[k + 1])
             cv2.line(vis, pt0, pt1, color, thickness=3)
-            # cv2.circle(vis, pt0, 7, (0, 0, 0), -1)
-            # cv2.circle(vis, pt0, 7, color, 2)
-            # cv2.circle(vis, pt1, 7, (0, 0, 0), -1)
-            # cv2.circle(vis, pt1, 7, color, 2)
-            # cv2.putText(vis, str(k), pt0, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
 
         if slot_raw_pts and slot in slot_raw_pts:
             for rx, ry in slot_raw_pts[slot]:
@@ -324,10 +496,34 @@ def draw_debug_image(img, bin_label, all_points, row_anchors, slot_raw_pts=None)
 
         mid_idx = len(valid_pts) // 2
         tx, ty = int(valid_pts[mid_idx, 0]), int(valid_pts[mid_idx, 1])
-        label = str(slot)
-        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 3)
+        label = _debug_overlay_text(slot, class_label)
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
         cv2.rectangle(vis, (tx - 2, ty - th - 4), (tx + tw + 2, ty + 4), (0, 0, 0), -1)
-        cv2.putText(vis, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
+        cv2.putText(vis, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+
+    if shapes:
+        for shape in shapes:
+            if not isinstance(shape, dict):
+                continue
+            if shape.get("label", "") in SKIP_LABELS:
+                continue
+            if not is_stop_line_shape(shape):
+                continue
+            pts = shape.get("points", [])
+            if len(pts) < 2:
+                continue
+            lbl = str(shape.get("label", "")).strip()
+            color = bgr_color_for_lane_label(lbl)
+            arr = np.asarray(pts, dtype=np.float32)
+            for i in range(len(arr) - 1):
+                p0 = (int(arr[i, 0]), int(arr[i, 1]))
+                p1 = (int(arr[i + 1, 0]), int(arr[i + 1, 1]))
+                cv2.line(vis, p0, p1, color, thickness=4)
+            mx, my = int(np.mean(arr[:, 0])), int(np.mean(arr[:, 1]))
+            t = _debug_overlay_text(None, lbl)
+            (tw, th), _ = cv2.getTextSize(t, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+            cv2.rectangle(vis, (mx - 2, my - th - 4), (mx + tw + 2, my + 4), (0, 0, 0), -1)
+            cv2.putText(vis, t, (mx, my), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
 
     return vis
 
@@ -340,29 +536,49 @@ def flatten_points_for_calc_k(points):
 def process_one_image(shapes, img_height, img_width, row_anchors):
     """
     Process one image's annotations.
-    Returns: (bin_label, seg_mask, all_points, slot_raw_pts, num_valid_lanes)
+    Returns: (bin_label, seg_mask, all_points, slot_raw_pts, num_valid_lanes, slot_labels)
       slot_raw_pts: dict mapping slot index -> list of [x,y] annotation points
+      slot_labels: dict slot index -> exact JSON class label string for debug visualization
     """
+    shapes = filter_boundary_close_lanes_keep_curb(shapes, img_width=img_width)
+
+    # Curvelane slot logic uses signed lane angle; horizontal stop lines have theta≈0 and
+    # never land in k_neg/k_pos. Process stop_line shapes separately (mask + JSON only).
     lanes = []
+    lane_labels = []
     for shape in shapes:
-        label = shape["label"]
+        if not isinstance(shape, dict):
+            continue
+        label = str(shape.get("label", "")).strip()
         if label in SKIP_LABELS:
             continue
-        pts = shape["points"]
+        if is_stop_line_shape(shape):
+            continue
+        pts = shape.get("points", [])
         if len(pts) < 2:
             continue
         sorted_pts = flatten_points_for_calc_k(pts)
         lanes.append(sorted_pts)
+        lane_labels.append(label)
 
-    # lanes = merge_collinear_lanes(lanes)
-    # lanes = deduplicate_lanes(lanes, row_anchors)
 
     if not lanes:
         bin_label = [0] * NUM_LANES
         seg_mask = np.zeros((img_height, img_width), dtype=np.uint8)
         all_points = np.full((NUM_LANES, len(row_anchors), 2), -99999.0)
         all_points[:, :, 1] = np.tile(row_anchors, (NUM_LANES, 1))
-        return bin_label, seg_mask, all_points, {}, 0
+        for shape in shapes:
+            if not isinstance(shape, dict):
+                continue
+            if shape.get("label", "") in SKIP_LABELS:
+                continue
+            if not is_stop_line_shape(shape):
+                continue
+            pts = shape.get("points", [])
+            if len(pts) < 2:
+                continue
+            draw_stop_line_on_mask(seg_mask, pts, img_width=img_width)
+        return bin_label, seg_mask, all_points, {}, 0, {}
 
     ks = np.array([calc_k(lane, img_height, img_width) for lane in lanes])
     ks_theta = np.array([calc_k(lane, img_height, img_width, angle=True) for lane in lanes])
@@ -382,6 +598,7 @@ def process_one_image(shapes, img_height, img_width, row_anchors):
     all_points = np.full((NUM_LANES, len(row_anchors), 2), -99999.0)
     all_points[:, :, 1] = np.tile(row_anchors, (NUM_LANES, 1))
     slot_raw_pts = {}
+    slot_labels = {}
 
     num_valid = 0
 
@@ -391,10 +608,11 @@ def process_one_image(shapes, img_height, img_width, row_anchors):
             continue
         which_lane = matches[0]
         slot = HALF_LANES - 1 - idx
-        draw_lane_on_mask(seg_mask, lanes[which_lane], slot + 1)
+        draw_lane_on_mask(seg_mask, lanes[which_lane], slot + 1, img_width=img_width)
         bin_label[slot] = 1
         all_points[slot] = spline_at_anchors(lanes[which_lane], row_anchors)
         slot_raw_pts[slot] = lanes[which_lane]
+        slot_labels[slot] = lane_labels[which_lane]
         num_valid += 1
 
     for idx in range(min(len(k_pos), HALF_LANES)):
@@ -403,21 +621,43 @@ def process_one_image(shapes, img_height, img_width, row_anchors):
             continue
         which_lane = matches[0]
         slot = HALF_LANES + idx
-        draw_lane_on_mask(seg_mask, lanes[which_lane], slot + 1)
+        draw_lane_on_mask(seg_mask, lanes[which_lane], slot + 1, img_width=img_width)
         bin_label[slot] = 1
         all_points[slot] = spline_at_anchors(lanes[which_lane], row_anchors)
         slot_raw_pts[slot] = lanes[which_lane]
+        slot_labels[slot] = lane_labels[which_lane]
         num_valid += 1
 
-    return bin_label, seg_mask, all_points, slot_raw_pts, num_valid
+    # Explicit stop lines: draw after slot assignment (mask value STOP_LINE_MASK_VALUE).
+    for shape in shapes:
+        if not isinstance(shape, dict):
+            continue
+        if shape.get("label", "") in SKIP_LABELS:
+            continue
+        if not is_stop_line_shape(shape):
+            continue
+        pts = shape.get("points", [])
+        if len(pts) < 2:
+            continue
+        draw_stop_line_on_mask(seg_mask, pts, img_width=img_width)
+
+    return bin_label, seg_mask, all_points, slot_raw_pts, num_valid, slot_labels
 
 
-def shapes_to_curvelanes_lines(shapes):
+def shapes_to_curvelanes_lines(shapes, img_width: int):
     """
     Convert LabelMe shapes to CurveLanes-like label payload:
-    {"Lines": [[{"x":..,"y":..}, ...], ...]}
+    {
+      "Lines": [[{"x":..,"y":..}, ...], ...],
+      "LineLabels": [...],          # original labelme label
+      "LineClassIds": [...],        # LANE_CLASS_TO_ID[exact label string]
+      "LaneClassMap": {name: id}
+    }
     """
+    shapes = filter_boundary_close_lanes_keep_curb(shapes, img_width=img_width)
     lines = []
+    line_labels = []
+    line_class_ids = []
     for shape in shapes:
         label = shape.get("label", "")
         if label in SKIP_LABELS:
@@ -432,7 +672,16 @@ def shapes_to_curvelanes_lines(shapes):
             line.append({"x": float(p[0]), "y": float(p[1])})
         if len(line) >= 2:
             lines.append(line)
-    return {"Lines": lines}
+            line_labels.append(str(label))
+            key = str(label).strip()
+            line_class_ids.append(int(LANE_CLASS_TO_ID.get(key, LANE_CLASS_TO_ID["invisible_line"])))
+
+    return {
+        "Lines": lines,
+        "LineLabels": line_labels,
+        "LineClassIds": line_class_ids,
+        "LaneClassMap": dict(LANE_CLASS_TO_ID),
+    }
 
 
 def split_sessions_by_ratio(sessions, train_ratio, valid_ratio, seed=42):
@@ -458,8 +707,7 @@ def ensure_split_dirs(output_dir, split_name):
     split_root = os.path.join(output_dir, split_name)
     os.makedirs(os.path.join(split_root, "images"), exist_ok=True)
     os.makedirs(os.path.join(split_root, "labels"), exist_ok=True)
-    # os.makedirs(os.path.join(split_root, "segs"), exist_ok=True)
-    # os.makedirs(os.path.join(split_root, "debug_vis"), exist_ok=True)
+    os.makedirs(os.path.join(split_root, "debug_vis"), exist_ok=True)
     return split_root
 
 
@@ -501,6 +749,9 @@ def process_split_sessions(input_dir, output_dir, split_name, sessions, row_anch
             if not shapes:
                 continue
 
+            # Apply boundary curb filtering once so mask + output JSON stay consistent.
+            shapes = filter_boundary_close_lanes_keep_curb(shapes, img_width=img_w)
+
             raw_out_name = f"{session}_{basename}"
             out_name = re.sub(r"[^A-Za-z0-9._-]", "_", raw_out_name)
 
@@ -508,34 +759,33 @@ def process_split_sessions(input_dir, output_dir, split_name, sessions, row_anch
             split_label_rel = f"{split_name}/labels/{out_name}.lines.json"
             img_rel = f"images/{out_name}.jpg"
             label_rel = f"labels/{out_name}.lines.json"
-            # split_seg_rel = f"{split_name}/segs/{out_name}.png"
-            # local_img_rel = f"images/{out_name}.jpg"
-            # local_label_rel = f"labels/{out_name}.lines.json"
-            # local_seg_rel = f"segs/{out_name}.png"
 
-            bin_label, seg_mask, points, slot_raw_pts, num_valid = process_one_image(
+            bin_label, seg_mask, points, slot_raw_pts, num_valid, slot_labels = process_one_image(
                 shapes, img_h, img_w, row_anchors
             )
-            lines_payload = shapes_to_curvelanes_lines(shapes)
+            lines_payload = shapes_to_curvelanes_lines(shapes, img_width=img_w)
 
             img = cv2.imread(img_path)
             cv2.imwrite(os.path.join(output_dir, split_img_rel), img)
             with open(os.path.join(output_dir, split_label_rel), "w") as f:
                 json.dump(lines_payload, f)
-            # cv2.imwrite(os.path.join(output_dir, split_seg_rel), seg_mask)
 
-            # debug_img = draw_debug_image(img, bin_label, points, row_anchors, slot_raw_pts)
-            # cv2.imwrite(os.path.join(split_root, f"debug_vis/{out_name}.jpg"), debug_img)
+            debug_img = draw_debug_image(
+                img,
+                bin_label,
+                points,
+                row_anchors,
+                slot_raw_pts,
+                slot_labels=slot_labels,
+                shapes=shapes,
+            )
+            cv2.imwrite(os.path.join(split_root, f"debug_vis/{out_name}.jpg"), debug_img)
 
             entries.append({
                 "img_rel": img_rel,
                 "label_rel": label_rel,
                 "split_img_rel": split_img_rel,
                 "split_label_rel": split_label_rel,
-                # "seg_rel": split_seg_rel,
-                # "img_local_rel": local_img_rel,
-                # "label_local_rel": local_label_rel,
-                # "seg_local_rel": local_seg_rel,
                 "bin_label": bin_label,
                 "points": points.tolist(),
                 "num_valid": num_valid,
@@ -553,7 +803,7 @@ def write_split_files(output_dir, split_name, entries):
     if split_name == "train":
         with open(os.path.join(split_root, list_filename), "w") as f:
             for entry in entries:
-                f.write(f"{entry['split_img_rel']} \n")
+                f.write(f"{entry['img_rel']} \n")
     elif split_name == "valid":
         with open(os.path.join(split_root, list_filename), "w") as f:
             for entry in entries:
@@ -611,8 +861,6 @@ def main():
                         help="Max vertical gap (px) between two segments to merge them (default: 100)")
     parser.add_argument("--merge-x-diff", type=float, default=30,
                         help="Max x-distance (px) at the meeting point to merge two segments (default: 80)")
-    parser.add_argument("--skip-stop-lines", action="store_true", default=True,
-                        help="Skip stop_line annotations (default: True)")
     parser.add_argument("--include-stop-lines", action="store_true", default=False,
                         help="Include stop_line annotations")
     args = parser.parse_args()
@@ -624,7 +872,7 @@ def main():
     DEDUP_THRESHOLD = args.dedup_threshold
     MERGE_Y_GAP = args.merge_y_gap
     MERGE_X_DIFF = args.merge_x_diff
-    if args.skip_stop_lines or not(args.include_stop_lines):
+    if not(args.include_stop_lines):
         SKIP_LABELS = {"stop_line"}
     else:
         SKIP_LABELS = set()
@@ -675,9 +923,9 @@ def main():
     write_split_files(args.output_dir, "train", train_entries)
     write_split_files(args.output_dir, "valid", valid_entries)
     write_split_files(args.output_dir, "test", test_entries)
-    write_cache_file(args.output_dir, "train", train_entries)
-    write_cache_file(args.output_dir, "valid", valid_entries)
-    write_cache_file(args.output_dir, "test", test_entries)
+    # write_cache_file(args.output_dir, "train", train_entries)
+    # write_cache_file(args.output_dir, "valid", valid_entries)
+    # write_cache_file(args.output_dir, "test", test_entries)
 
     all_entries = train_entries + valid_entries + test_entries
     lane_counts = Counter()
@@ -694,16 +942,6 @@ def main():
     print(f"\n  Lane count distribution (after slot assignment):")
     for k in sorted(lane_counts.keys()):
         print(f"    {k} lanes: {lane_counts[k]} images")
-    print(f"\n  Output: {args.output_dir}")
-    print(f"    train/train_gt.txt ({len(train_entries)} entries)")
-    print(f"    train/train.txt")
-    print(f"    train/curvelanes_anno_cache.json")
-    print(f"    valid/valid_gt.txt ({len(valid_entries)} entries)")
-    print(f"    valid/valid.txt")
-    print(f"    valid/culane_anno_cache_val.json")
-    print(f"    valid/valid_for_culane_style.txt ({len(valid_entries)} entries)")
-    print(f"    test/test.txt ({len(test_entries)} entries)")
-    print(f"    test/culane_anno_cache_test.json")
 
 
 if __name__ == "__main__":

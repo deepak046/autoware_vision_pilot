@@ -123,28 +123,49 @@ class LanesLoss(nn.Module):
     # -------------------------------------------------
     # Public API
     # -------------------------------------------------
+    # def forward(self, logits, gt):
+    #     """
+    #     logits: [B, 3, H, W]
+    #     gt:     [B, 3, H, W]   (already downsampled as in original pipeline)
+    #     """
+
+    #     pred_left  = logits[:, 0, :, :]
+    #     pred_right = logits[:, 1, :, :]
+    #     pred_other = logits[:, 2, :, :]
+
+    #     gt_left  = gt[:, 0, :, :]
+    #     gt_right = gt[:, 1, :, :]
+    #     gt_other = gt[:, 2, :, :]
+
+    #     left_loss  = self._lane_loss(pred_left,  gt_left)
+    #     right_loss = self._lane_loss(pred_right, gt_right)
+    #     other_loss = self._lane_loss(pred_other, gt_other)
+
+    #     total_loss = 2.0 * left_loss + 2.0 * right_loss + 1.0 * other_loss
+    #     return total_loss
+
     def forward(self, logits, gt):
         """
-        logits: [B, 3, H, W]
-        gt:     [B, 3, H, W]   (already downsampled as in original pipeline)
+        logits: [B, C, H, W]
+        gt:     [B, C, H, W]   (already downsampled as in original pipeline)
+        Get the loss for C lane classes
         """
+        total_loss = 0.0
+        C = gt.shape[1]
+        if C == 3:
+            loss_left = self._lane_loss(logits[:, 0, :, :], gt[:, 0, :, :])
+            loss_right = self._lane_loss(logits[:, 1, :, :], gt[:, 1, :, :])
+            loss_other = self._lane_loss(logits[:, 2, :, :], gt[:, 2, :, :])
+            total_loss = 2.0 * loss_left + 2.0 * loss_right + 1.0 * loss_other
+            return total_loss
+        else:
+            for i in range(C):
+                pred_i = logits[:, i, :, :]
+                gt_i = gt[:, i, :, :]
+                loss = self._lane_loss(pred_i, gt_i)
+                total_loss += loss
 
-        pred_left  = logits[:, 0, :, :]
-        pred_right = logits[:, 1, :, :]
-        pred_other = logits[:, 2, :, :]
-
-        gt_left  = gt[:, 0, :, :]
-        gt_right = gt[:, 1, :, :]
-        gt_other = gt[:, 2, :, :]
-
-        left_loss  = self._lane_loss(pred_left,  gt_left)
-        right_loss = self._lane_loss(pred_right, gt_right)
-        other_loss = self._lane_loss(pred_other, gt_other)
-
-        total_loss = 2.0 * left_loss + 2.0 * right_loss + 1.0 * other_loss
         return total_loss
-
-
     # -------------------------------------------------
     # Lane loss = BCE + MultiScaleEdge
     # -------------------------------------------------
@@ -153,16 +174,16 @@ class LanesLoss(nn.Module):
         if self.downsample_factor > 1:
             gt = self._downsample_gt(gt, factor=self.downsample_factor)
 
-        # seg_loss  = self.bce(pred, gt)
-        # edge_loss = self._multi_scale_edge_loss(pred, gt)
-        # return seg_loss + edge_loss
+        seg_loss  = self.bce(pred, gt)
+        edge_loss = self._multi_scale_edge_loss(pred, gt)
+        return seg_loss + edge_loss
 
-        focal_loss = self.focal(pred, gt)
-        pred_probs = torch.sigmoid(pred) # Prediction logits to [0,1]
-        dice_loss = self.dice(pred_probs, gt)
-        edge_loss = self._multi_scale_edge_loss(pred_probs, gt)
+        # focal_loss = self.focal(pred, gt)
+        # pred_probs = torch.sigmoid(pred) # Prediction logits to [0,1]
+        # dice_loss = self.dice(pred_probs, gt)
+        # edge_loss = self._multi_scale_edge_loss(pred_probs, gt)
 
-        return focal_loss + dice_loss + (0.5 * edge_loss) # Combined loss
+        # return focal_loss + dice_loss + (0.5 * edge_loss) # Combined loss
 
     def _downsample_gt(self, gt, factor=4):
         """

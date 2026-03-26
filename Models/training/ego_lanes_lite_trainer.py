@@ -148,6 +148,7 @@ class EgoLanesLiteTrainer(LiteTrainerBase):
  # -------------------------
     # Validation + checkpoints
     # -------------------------
+    # TODO: Deepak
     def _run_validation_and_checkpoint(self):
         print(f"[samples={self.samples_seen}] Running validation...")
 
