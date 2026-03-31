@@ -378,6 +378,57 @@ def infer_logits_chw(session_backend: str, session_obj: Any, input_array: np.nda
         return out.detach().cpu().numpy()[0]  # [C, H, W]
 
 
+def synchronize_backend(session_backend: str, session_obj: Any) -> None:
+    """
+    Synchronize backend for accurate latency timing when needed.
+    """
+    if session_backend == "torchscript":
+        _model, torch_device = session_obj
+        if torch_device.type == "cuda" and torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+
+def benchmark_raw_inference(
+    session_backend: str,
+    session_obj: Any,
+    input_array: np.ndarray,
+    *,
+    warmup_runs: int,
+    benchmark_runs: int,
+) -> None:
+    """
+    Benchmark model-only inference on one preprocessed [1,3,H,W] input.
+    Excludes disk I/O, video decode, visualization, and file writing.
+    """
+    if benchmark_runs <= 0:
+        raise RuntimeError("--benchmark_runs must be > 0")
+    if warmup_runs < 0:
+        raise RuntimeError("--benchmark_warmup must be >= 0")
+
+    print(
+        f"[Benchmark] backend={session_backend}, "
+        f"warmup_runs={warmup_runs}, benchmark_runs={benchmark_runs}"
+    )
+
+    for _ in range(warmup_runs):
+        _ = infer_logits_chw(session_backend, session_obj, input_array)
+    synchronize_backend(session_backend, session_obj)
+
+    t0 = time.perf_counter()
+    for _ in range(benchmark_runs):
+        _ = infer_logits_chw(session_backend, session_obj, input_array)
+    synchronize_backend(session_backend, session_obj)
+    t1 = time.perf_counter()
+
+    total_s = max(t1 - t0, 1e-12)
+    avg_ms = (total_s / benchmark_runs) * 1000.0
+    fps = benchmark_runs / total_s
+
+    print(f"[Benchmark] Total time: {total_s:.4f} s")
+    print(f"[Benchmark] Avg inference latency: {avg_ms:.3f} ms")
+    print(f"[Benchmark] Throughput: {fps:.2f} FPS")
+
+
 def run_session(sess: ort.InferenceSession, input_array: np.ndarray) -> np.ndarray:
     input_name = sess.get_inputs()[0].name
     output_name = sess.get_outputs()[0].name
@@ -632,13 +683,30 @@ def main() -> None:
         "--save_lane_lines_json", default=True, type=bool,
         help="Include fitted lane polylines in the JSONL output (can be large)",
     )
+    parser.add_argument(
+        "--benchmark_only", action="store_true",
+        help="Run raw model benchmark on one image and exit (no output video/images)",
+    )
+    parser.add_argument(
+        "--benchmark_image", default=None,
+        help="Image path for benchmark input. If omitted, first image from --input_dir is used.",
+    )
+    parser.add_argument(
+        "--benchmark_warmup", type=int, default=5,
+        help="Warmup iterations before benchmark timing (default: 5)",
+    )
+    parser.add_argument(
+        "--benchmark_runs", type=int, default=200,
+        help="Timed inference iterations for benchmark (default: 200)",
+    )
 
     args = parser.parse_args()
 
-    if args.input_dir is not None and args.input_video is not None:
-        raise RuntimeError("Specify only one of --input_dir or --input_video.")
-    if args.input_dir is None and args.input_video is None:
-        raise RuntimeError("You must specify either --input_dir or --input_video.")
+    if not args.benchmark_only:
+        if args.input_dir is not None and args.input_video is not None:
+            raise RuntimeError("Specify only one of --input_dir or --input_video.")
+        if args.input_dir is None and args.input_video is None:
+            raise RuntimeError("You must specify either --input_dir or --input_video.")
 
     backend = args.backend
     if backend == "auto":
@@ -654,6 +722,31 @@ def main() -> None:
         args.torch_device = "cpu"
 
     session_backend, session_obj = create_backend_session(args.model, backend, args.torch_device)
+
+    if args.benchmark_only:
+        bench_image = args.benchmark_image
+        if bench_image is None:
+            if args.input_dir is None:
+                raise RuntimeError(
+                    "For --benchmark_only, pass --benchmark_image or provide --input_dir."
+                )
+            image_paths = list_images(args.input_dir)
+            if not image_paths:
+                raise RuntimeError(f"No images found in: {args.input_dir}")
+            bench_image = image_paths[0]
+
+        print(f"[Benchmark] Using input image: {bench_image}")
+        img_rgb = np.array(Image.open(bench_image).convert("RGB"))
+        input_arr = preprocess(img_rgb, args.height, args.width)
+
+        benchmark_raw_inference(
+            session_backend,
+            session_obj,
+            input_arr,
+            warmup_runs=args.benchmark_warmup,
+            benchmark_runs=args.benchmark_runs,
+        )
+        return
 
     if args.input_video is not None:
         run_inference_video(
