@@ -41,6 +41,18 @@ LANE_CLASS_COLORS_RGB_8 = [
     (128, 128, 128),
 ]
 
+LANE_CLASS_COLORS_INFER_RGB_8 = [
+    # Brighter, high-contrast palette for inference overlays.
+    (0, 128, 255),  # bright blue
+    (0, 255, 255),    # cyan
+    (255, 255, 0),    # yellow
+    (255, 0, 255),    # magenta
+    (0, 255, 0),      # green
+    (255, 165, 0),    # orange
+    (255, 0, 0),      # red
+    (255, 255, 255),    # white
+]
+
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
@@ -127,19 +139,24 @@ def logits_to_lane_class_id_hw(
     return x.argmax(dim=0).cpu().numpy().astype(np.int64)
 
 
-def apply_lane_colors_rgb_8class(canvas: np.ndarray, mask8: np.ndarray) -> np.ndarray:
+def apply_lane_colors_rgb_8class(canvas: np.ndarray, mask8: np.ndarray, use_inference_colors: bool = False) -> np.ndarray:
     """
     canvas: HxWx3 uint8 RGB
     mask8: HxWx8 bool — multi-label or one-hot; paints class colors (later indices
     overwrite earlier on overlaps).
     """
+
+    if use_inference_colors:
+        colors = LANE_CLASS_COLORS_INFER_RGB_8
+    else:
+        colors = LANE_CLASS_COLORS_RGB_8
     out = canvas.copy()
     if mask8.dtype != np.bool_:
         if mask8.max() > 1.5:
             mask8 = mask8 > 127
         else:
             mask8 = mask8 > 0.5
-    for i, color in enumerate(LANE_CLASS_COLORS_RGB_8):
+    for i, color in enumerate(colors):
         ys, xs = np.where(mask8[..., i])
         out[ys, xs, :] = color
     return out
@@ -162,7 +179,7 @@ def make_lane_vis_pair_C_class(
     alpha: float = 0.5,
     pred_threshold: float = 0.0,
     pred_use_sigmoid: bool = False,
-    pred_use_argmax: bool = True,
+    pred_use_argmax: bool = False,
 ):
     """
     Generic 2x2 visualization for multi-class lane heads.
@@ -193,16 +210,16 @@ def make_lane_vis_pair_C_class(
         gt_colored = _apply_lane_colors_rgb(base_img_small, gt_mask3)
     elif C == 8:
         # TODO: Deepak
-        # if pred_use_argmax:
-        #     pred_mask8 = logits_to_lane_maskC_argmax(
-        #         pred_logits_chw, use_sigmoid=pred_use_sigmoid
-        #     )
-        # else:
-        pred_mask8 = logits_to_lane_maskC(
-            pred_logits_chw,
-            threshold=pred_threshold,
-            use_sigmoid=pred_use_sigmoid,
-        )
+        if pred_use_argmax:
+            pred_mask8 = logits_to_lane_maskC_argmax(
+                pred_logits_chw, use_sigmoid=pred_use_sigmoid
+            )
+        else:
+            pred_mask8 = logits_to_lane_maskC(
+                pred_logits_chw,
+                threshold=pred_threshold,
+                use_sigmoid=pred_use_sigmoid,
+            )
         pred_colored = apply_lane_colors_rgb_8class(base_img_small, pred_mask8)
         gt_colored = apply_lane_colors_rgb_8class(base_img_small, gt_maskC)
     else:
@@ -275,8 +292,9 @@ def validate_lanes(
     dataset_name=None,
     vis_count: int = 25,
     alpha: float = 0.5,
-    pred_threshold: float = 0.0,
-    pred_use_sigmoid: bool = False,
+    pred_threshold: float = 0.5,
+    pred_use_sigmoid: bool = True,
+    pred_use_argmax: bool = True,
 ):
     """
     Lane segmentation validation with:
@@ -340,10 +358,7 @@ def validate_lanes(
             # -------------------------------------------------
             # Metrics
             # -------------------------------------------------
-            if pred_use_sigmoid:
-                pred_scores = torch.sigmoid(logits)
-            else:
-                pred_scores = logits
+            pred_scores = torch.sigmoid(logits) if pred_use_sigmoid else logits
 
             preds_bin = pred_scores > pred_threshold  # [B,C,H',W']
 
@@ -373,7 +388,7 @@ def validate_lanes(
                         alpha=alpha,
                         pred_threshold=pred_threshold,
                         pred_use_sigmoid=pred_use_sigmoid,
-                        pred_use_argmax=True if C == 8 else False,
+                        pred_use_argmax=pred_use_argmax,
                     )
                     vis_images.append(tile)
                     vis_done += 1

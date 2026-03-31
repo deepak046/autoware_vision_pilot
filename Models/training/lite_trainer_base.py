@@ -70,6 +70,7 @@ class LiteTrainerBase(ABC):
                 load_decoder=self.decoder_cfg.get("load_decoder", True),
                 freeze_encoder=self.backbone_cfg.get("freeze_encoder", False),
                 freeze_decoder=self.decoder_cfg.get("freeze_decoder", False),
+                bottleneck=self.bottleneck_cfg.get("type", "none"),
                 #head params
                 head_upsampling=self.head_cfg.get("head_upsampling", 1),
                 head_activation=self.head_cfg.get("head_activation", None),

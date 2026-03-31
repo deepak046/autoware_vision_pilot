@@ -36,11 +36,7 @@ from Models.data_utils.lite_models.helpers.lanes import (
     _apply_lane_colors_rgb,
     apply_lane_colors_rgb_8class,
     denorm_image_chw_to_uint8,
-    logits_to_lane_class_id_hw,
-    logits_to_lane_mask3_argmax,
-    logits_to_lane_mask3,
-    logits_to_lane_mask8,
-    logits_to_lane_mask8_argmax,
+    logits_to_lane_maskC,
 )
 from Models.data_utils.lite_models.helpers.training import load_yaml, set_global_seed
 from Models.training.lite_trainer_base import LiteTrainerBase
@@ -65,6 +61,7 @@ class EgoLanesLiteInferModel(LiteTrainerBase):
         self.network_cfg = cfg["network"]
         self.backbone_cfg = self.network_cfg.get("backbone", {})
         self.decoder_cfg = self.network_cfg.get("decoder", {})
+        self.bottleneck_cfg = self.network_cfg.get("bottleneck", {})
         self.head_cfg = self.network_cfg.get("head", {})
 
         # Match training behavior for backbone name normalization
@@ -119,6 +116,8 @@ def run_inference(
     model_wrapper: EgoLanesLiteInferModel,
     image_paths: List[str],
     output_dir: str,
+    pred_use_sigmoid: bool = True,
+    pred_threshold: float = 0.5,
 ) -> None:
     os.makedirs(output_dir, exist_ok=True)
 
@@ -154,8 +153,8 @@ def run_inference(
                 # each pixel gets one class; avoids "all green" when the model
                 # predicts "other" with high prob everywhere (e.g. dice+focal+edge).
                 base_img = denorm_image_chw_to_uint8(image_chw)
-                pred_mask3 = logits_to_lane_mask3(
-                    pred_logits_chw, threshold=0.0, use_sigmoid=False
+                pred_mask3 = logits_to_lane_maskC(
+                    pred_logits_chw, threshold=pred_threshold, use_sigmoid=pred_use_sigmoid
                 )
                 pred_colored = _apply_lane_colors_rgb(base_img, pred_mask3)
                 pred_overlay = cv2.addWeighted(pred_colored, 0.5, base_img, 0.5, 0)
@@ -165,12 +164,12 @@ def run_inference(
             elif pred_logits_chw.shape[0] == 8:
                 # 8-class lane taxonomy (same order as LANE_CLASS_NAMES_8)
                 base_img = denorm_image_chw_to_uint8(image_chw)
-                pred_mask8 = logits_to_lane_mask8(
+                pred_mask8 = logits_to_lane_maskC(
                     pred_logits_chw,
-                    threshold=0.0,
-                    use_sigmoid=False,
+                    threshold=pred_threshold,
+                    use_sigmoid=pred_use_sigmoid,
                 )
-                pred_colored = apply_lane_colors_rgb_8class(base_img, pred_mask8)
+                pred_colored = apply_lane_colors_rgb_8class(base_img, pred_mask8, use_inference_colors=True)
                 pred_overlay = cv2.addWeighted(pred_colored, 0.5, base_img, 0.5, 0)
                 tile = np.concatenate([base_img, pred_overlay], axis=1)
                 vis_path = os.path.join(output_dir, f"{base}_vis.png")
@@ -198,6 +197,8 @@ def run_inference_video(
     model_wrapper: EgoLanesLiteInferModel,
     video_path: str,
     output_dir: str,
+    pred_use_sigmoid: bool = True,
+    pred_threshold: float = 0.5,
 ) -> None:
     os.makedirs(output_dir, exist_ok=True)
 
@@ -242,18 +243,18 @@ def run_inference_video(
 
             if pred_logits_chw.shape[0] == 3:
                 base_img = denorm_image_chw_to_uint8(image_chw)
-                pred_mask3 = logits_to_lane_mask3(
-                    pred_logits_chw, threshold=0.0, use_sigmoid=False
+                pred_mask3 = logits_to_lane_maskC(
+                    pred_logits_chw, threshold=pred_threshold, use_sigmoid=pred_use_sigmoid
                 )
                 pred_colored = _apply_lane_colors_rgb(base_img, pred_mask3)
                 # Only the processed (overlay) image in the video
                 tile_rgb = cv2.addWeighted(pred_colored, 0.5, base_img, 0.5, 0)
             elif pred_logits_chw.shape[0] == 8:
                 base_img = denorm_image_chw_to_uint8(image_chw)
-                pred_mask8 = logits_to_lane_mask8(
-                    pred_logits_chw, threshold=0.0, use_sigmoid=False
+                pred_mask8 = logits_to_lane_maskC(
+                    pred_logits_chw, threshold=pred_threshold, use_sigmoid=pred_use_sigmoid
                 )
-                pred_colored = apply_lane_colors_rgb_8class(base_img, pred_mask8)
+                pred_colored = apply_lane_colors_rgb_8class(base_img, pred_mask8, use_inference_colors=True)
                 # Only the processed (overlay) image in the video
                 tile_rgb = cv2.addWeighted(pred_colored, 0.5, base_img, 0.5, 0)         
             else:
@@ -343,6 +344,16 @@ def main() -> None:
         default=None,
         help="Optional device override, e.g. 'cuda:0' or 'cpu' (default: config/auto)",
     )
+    parser.add_argument(
+        "--pred_use_sigmoid",
+        default=True,
+        help="Use sigmoid activation function for prediction",
+    )
+    parser.add_argument(
+        "--pred_threshold",
+        default=0.5,
+        help="Threshold for prediction",
+    )
 
     args = parser.parse_args()
 
@@ -359,12 +370,18 @@ def main() -> None:
         run_inference_video(
             infer_model,
             args.input_video,
-            args.output_dir)
+            args.output_dir,
+            pred_use_sigmoid=args.pred_use_sigmoid,
+            pred_threshold=args.pred_threshold,
+        )
     elif args.input_dir is not None:
         image_paths = list_images(args.input_dir)
         if not image_paths:
             raise RuntimeError(f"No images found in directory: {args.input_dir}")
-        run_inference(infer_model, image_paths, args.output_dir)
+        run_inference(infer_model, image_paths, args.output_dir,
+            pred_use_sigmoid=args.pred_use_sigmoid,
+            pred_threshold=args.pred_threshold,
+        )
     else:
         raise RuntimeError("You must specify either --input_dir or --input_video.")
 

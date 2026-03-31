@@ -1,11 +1,11 @@
 experiment:
-  name: "EgoLanesLite_complete_light_noatt_aug_8stride_newloss_100ep"
-  output_dir: "runs/training/EgoLanesLite/"
+  name: "complete_unet_8class_fcn_skip_cbam_batch8_sigmoid_0.5_cross"
+  output_dir: "runs/training/EgoLanesLite_8class/"
   seed: 42
   device: "cuda"    # "cuda", "cuda:0", or "cpu"
   wandb:
     enabled: true
-    project_name: "EgoLanesLite_stopline"     #it is fixed from the account
+    project_name: "EgoLanesLite_8class"     #it is fixed from the account
 
 checkpoint:
   load_from:   # path to checkpoint to load before training
@@ -13,8 +13,7 @@ checkpoint:
 
 dataset:
   training_sets: ["curvelanes"]    # <--- LIST OF DATASETS TO USE FOR TRAIN
-  curvelanes_root: "/home/deepak/Desktop/qtpie/lane_detection_classification/autoware_vision_pilot/data/" 
-  #"/home/new_user/Desktop/shared-data/Line/Training/Train_Lane_Detection/curvelane_Line_Annotations_New"
+  curvelanes_root: "/home/new_user/Desktop/shared-data/Line/Training/Train_Lane_Detection/Line_Annotations_New/curvelane_complete_label/"
 
   validation_sets: ["curvelanes"]    # <--- LIST OF DATASETS TO USE FOR VALIDATION
 
@@ -67,12 +66,12 @@ dataset:
 
 
 dataloader:
-  batch_size: 2             # how many samples per optimization step
-  num_workers: 2            # how many workers for data loading
+  batch_size: 8             # how many samples per optimization step
+  num_workers: 8            # how many workers for data loading
   pin_memory: true          # pin memory for dataloader
   persistent_workers: true  # keep workers alive between epochs
   drop_last: true           # drop last incomplete batch
-  prefetch_factor: 2        # number of batches to prefetch
+  prefetch_factor: 8        # number of batches to prefetch
   shuffle_train: true       # shuffle training data (random order, but complete every sample before epoch)
   shuffle_val: false        # do not shuffle validation data
 
@@ -80,7 +79,7 @@ training:
   mode: "epoch"        # "epoch" or "steps" 
   max_epochs: 100       # used if mode == "epoch"
   max_steps: 150000     # used if mode == "steps". step = optimization step (so affected by batch size and grad accum)
-  grad_accum_steps: 1
+  grad_accum_steps: 2
 
   validation:
     mode: "epoch"        # "epoch" or "steps"
@@ -110,7 +109,7 @@ scheduler:
   gamma: 0.1              # used if type == "step"
   
   #for "warmup_cosine" scheduler and "cosine" scheduler
-  warmup_steps: 1000      # used if type == "warmup_cosine". Note: steps = OPTIMIZATION STEPS (batch_size * iterations)
+  warmup_steps: 850      # used if type == "warmup_cosine". Note: steps = OPTIMIZATION STEPS (batch_size * iterations)
   min_lr: 5.0e-6          # used if type == "warmup_cosine"
 
 loss:
@@ -124,7 +123,7 @@ network:
   #   pooling: "avg"    # "avg" | "max"
   #   activation: "relu"    # "relu" | "elu" | "leaky_relu" | "tanh" | "sigmoid" | "none"
   #load a pretrained model to use as backbone (also as decoder if specified)
-  pretrained_model_path: #"/home/sergey/DEV/AI/AEI/runs/training/segmentation/dlv3plus_efficientnetb1_v2/checkpoints/best_mIoU.pth"     # path to a pretrained model to use as backbone (overrides 'pretrained' flag)
+  # pretrained_model_path: "/home/new_user/qtpie/lane_detection/autoware_vision_pilot/runs/training/EgoLanesLite_8class/complete_light_aug_8class_fcn_skip_cbam_square_blobs/best_epoch_6.pth"
 
   backbone:
     type: "efficientnet_b0"  # e.g., "resnet50", "efficientnet_b0", etc.
@@ -147,15 +146,15 @@ network:
 
   decoder:
     #for deeplabv3plus
-    aspp_dilations: [12, 24, 36]   #dilation rates for ASPP module
-    deeplabv3plus_decoder_channels: 64        #number of channels in decoder
+    aspp_dilations: [6, 12, 18]   #dilation rates for ASPP module
+    deeplabv3plus_decoder_channels: 256        #number of channels in decoder
 
     load_decoder: false    # whether to load decoder weights from the pretrained model specified in backbone.pretrained_model_path
     freeze_decoder: false    # whether to freeze decoder weights during training
 
     #for unetplusplus
     unetplusplus_decoder_channels: [128, 64, 32, 16, 8] # light: [128, 64, 32, 16, 8], heavy: [512, 256, 128, 64, 32]
-    decoder_interpolation: "nearest"
+    decoder_interpolation: "bilinear" # "nearest" | "bilinear"
     # decoder_attention: "" # "" | "scse"
 
   head:

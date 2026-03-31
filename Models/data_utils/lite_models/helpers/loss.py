@@ -61,7 +61,7 @@ class DiceLoss(nn.Module):
         return 1.0 - dice_score
 
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=0.25, gamma=2.0):
+    def __init__(self, alpha=0.75, gamma=2.0): # Notice alpha is higher for positive class
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
@@ -69,8 +69,14 @@ class FocalLoss(nn.Module):
 
     def forward(self, inputs, targets):
         bce_loss = self.bce_with_logits(inputs, targets)
-        pt = torch.exp(-bce_loss) # Prevents numerical instability
-        focal_loss = self.alpha * (1 - pt) ** self.gamma * bce_loss
+        pt = torch.exp(-bce_loss) 
+        
+        # CORRECT ALPHA SCALING:
+        # If target=1, alpha_factor = alpha. If target=0, alpha_factor = 1-alpha.
+        targets_float = targets.float()
+        alpha_factor = targets_float * self.alpha + (1 - targets_float) * (1 - self.alpha)
+        
+        focal_loss = alpha_factor * ((1 - pt) ** self.gamma) * bce_loss
         return focal_loss.mean()
     
 
@@ -97,7 +103,7 @@ class LanesLoss(nn.Module):
         self.downsample_factor = downsample_factor
         self.bce = nn.BCEWithLogitsLoss()
         self.dice = DiceLoss()
-        self.focal = FocalLoss(alpha=0.25, gamma=2.0)
+        self.focal = FocalLoss(alpha=0.9, gamma=2.0) # alpha is higher for positive class
 
         # Sobel filters (exact values from original code)
         gx = torch.tensor([
@@ -118,31 +124,6 @@ class LanesLoss(nn.Module):
         self.avg_pool = nn.AvgPool2d(2, stride=2)
         self.relu = nn.ReLU()
         self.threshold = nn.Threshold(0.0, 1.0)
-
-
-    # -------------------------------------------------
-    # Public API
-    # -------------------------------------------------
-    # def forward(self, logits, gt):
-    #     """
-    #     logits: [B, 3, H, W]
-    #     gt:     [B, 3, H, W]   (already downsampled as in original pipeline)
-    #     """
-
-    #     pred_left  = logits[:, 0, :, :]
-    #     pred_right = logits[:, 1, :, :]
-    #     pred_other = logits[:, 2, :, :]
-
-    #     gt_left  = gt[:, 0, :, :]
-    #     gt_right = gt[:, 1, :, :]
-    #     gt_other = gt[:, 2, :, :]
-
-    #     left_loss  = self._lane_loss(pred_left,  gt_left)
-    #     right_loss = self._lane_loss(pred_right, gt_right)
-    #     other_loss = self._lane_loss(pred_other, gt_other)
-
-    #     total_loss = 2.0 * left_loss + 2.0 * right_loss + 1.0 * other_loss
-    #     return total_loss
 
     def forward(self, logits, gt):
         """
@@ -182,7 +163,6 @@ class LanesLoss(nn.Module):
         # pred_probs = torch.sigmoid(pred) # Prediction logits to [0,1]
         # dice_loss = self.dice(pred_probs, gt)
         # edge_loss = self._multi_scale_edge_loss(pred_probs, gt)
-
         # return focal_loss + dice_loss + (0.5 * edge_loss) # Combined loss
 
     def _downsample_gt(self, gt, factor=4):

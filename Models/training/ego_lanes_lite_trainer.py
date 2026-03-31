@@ -164,6 +164,9 @@ class EgoLanesLiteTrainer(LiteTrainerBase):
                 logger=self.wb,
                 step=self.global_step,
                 dataset_name=ds_name,
+                pred_use_sigmoid=True, # Either sigmoid and 0.5 or Logits and 0.0 (they're the same)
+                pred_threshold=0.5,
+                pred_use_argmax=False,
             )
 
             dataset_metrics[ds_name] = metrics
