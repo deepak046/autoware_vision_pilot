@@ -35,9 +35,9 @@ LANE_CLASSES_8 = [
     "invisible_line",          # 7
 ]
 LANE_CLASSES_3 = [
-    "egoleft",
-    "egoright",
-    "other_lanes",
+    "egoleft_lane",
+    "egoright_lane",
+    "other",
 ]
 
 ACTIVE_LANE_CLASSES = list(LANE_CLASSES_8)
@@ -115,18 +115,67 @@ def _lane_mean_x(points) -> float:
     return float(np.mean(pts[:, 0]))
 
 
+def _lane_assignment_x(points, ref_y: float) -> float:
+    """
+    Assignment-only lane x-position at a common near-bottom y.
+    Uses linear x(y) extrapolation from bottom points to avoid angle bias from mean-x.
+    """
+    pts = np.asarray(points, dtype=np.float32)
+    if pts.ndim != 2 or pts.shape[0] < 2:
+        return float("nan")
+
+    # Bottom-most points are more relevant for ego-lane side assignment.
+    order = np.argsort(-pts[:, 1])
+    bottom = pts[order][: min(6, len(pts))]
+    ys = bottom[:, 1]
+    xs = bottom[:, 0]
+
+    # If vertical support is too small, fallback to bottom point x.
+    if np.ptp(ys) < 1.0:
+        return float(xs[0])
+
+    try:
+        coeff = np.polyfit(ys, xs, deg=1)  # x as a function of y
+        x_at_ref = np.polyval(coeff, ref_y)
+        if np.isfinite(x_at_ref):
+            return float(x_at_ref)
+    except Exception:
+        pass
+
+    return float(xs[0])
+
+
 def assign_three_class_names(shapes, img_width: int):
     """
     Assign per-shape 3-class names:
-      - egoleft: closest lane to image center on left side
-      - egoright: closest lane to image center on right side
-      - other_lanes: all remaining lanes
+      - egoleft_lane: closest lane to image center on left side
+      - egoright_lane: closest lane to image center on right side
+      - other: all remaining lanes
     """
     class_name_by_shape_idx = {}
     if not shapes or img_width <= 0:
         return class_name_by_shape_idx
 
     center_x = img_width / 2.0
+    ref_y = None
+    for shape in shapes:
+        if not isinstance(shape, dict):
+            continue
+        label = str(shape.get("label", "")).strip()
+        if label in SKIP_LABELS or label == "stop_line":
+            continue
+        pts = shape.get("points", [])
+        if not isinstance(pts, list) or len(pts) < 2:
+            continue
+        ys = np.asarray(pts, dtype=np.float32)[:, 1]
+        if ys.size == 0:
+            continue
+        y_max = float(np.max(ys))
+        ref_y = y_max if ref_y is None else max(ref_y, y_max)
+
+    if ref_y is None:
+        ref_y = 0.0
+
     candidates = []
     for idx, shape in enumerate(shapes):
         if not isinstance(shape, dict):
@@ -138,24 +187,24 @@ def assign_three_class_names(shapes, img_width: int):
         if not isinstance(pts, list) or len(pts) < 2:
             continue
         if label == "stop_line":
-            class_name_by_shape_idx[idx] = "other_lanes"
+            class_name_by_shape_idx[idx] = "other"
             continue
-        mx = _lane_mean_x(pts)
-        if not np.isfinite(mx):
-            class_name_by_shape_idx[idx] = "other_lanes"
+        ax = _lane_assignment_x(pts, ref_y=ref_y)
+        if not np.isfinite(ax):
+            class_name_by_shape_idx[idx] = "other"
             continue
-        candidates.append((idx, float(mx)))
-        class_name_by_shape_idx[idx] = "other_lanes"
+        candidates.append((idx, float(ax)))
+        class_name_by_shape_idx[idx] = "other"
 
     left_candidates = [(i, mx) for i, mx in candidates if mx < center_x]
     right_candidates = [(i, mx) for i, mx in candidates if mx >= center_x]
 
     if left_candidates:
         left_idx = max(left_candidates, key=lambda t: t[1])[0]
-        class_name_by_shape_idx[left_idx] = "egoleft"
+        class_name_by_shape_idx[left_idx] = "egoleft_lane"
     if right_candidates:
         right_idx = min(right_candidates, key=lambda t: t[1])[0]
-        class_name_by_shape_idx[right_idx] = "egoright"
+        class_name_by_shape_idx[right_idx] = "egoright_lane"
 
     return class_name_by_shape_idx
 
@@ -615,14 +664,16 @@ def shapes_to_curvelanes_lines(shapes, img_width: int):
             line.append({"x": float(p[0]), "y": float(p[1])})
         if len(line) >= 2:
             lines.append(line)
-            line_labels.append(str(label))
             if CLASS_MODE == 8:
                 key = str(label).strip()
                 fallback = ACTIVE_LANE_CLASS_TO_ID.get("invisible_line", 0)
                 cls_id = int(ACTIVE_LANE_CLASS_TO_ID.get(key, fallback))
+                out_label = key if key in ACTIVE_LANE_CLASS_TO_ID else "invisible_line"
             else:
-                key = class_name_by_shape_idx.get(idx, "other_lanes")
-                cls_id = int(ACTIVE_LANE_CLASS_TO_ID.get(key, ACTIVE_LANE_CLASS_TO_ID["other_lanes"]))
+                key = class_name_by_shape_idx.get(idx, "other")
+                cls_id = int(ACTIVE_LANE_CLASS_TO_ID.get(key, ACTIVE_LANE_CLASS_TO_ID["other"]))
+                out_label = key
+            line_labels.append(out_label)
             line_class_ids.append(cls_id)
 
     return {
@@ -670,7 +721,7 @@ def process_split_sessions(input_dir, output_dir, split_name, sessions, row_anch
 
     for session in sessions:
         session_path = os.path.join(input_dir, session)
-        json_dir = os.path.join(session_path, "labels")
+        json_dir = os.path.join(session_path, "labels_json")
         images_dir = os.path.join(session_path, "images")
 
         if not os.path.isdir(json_dir) or not os.path.isdir(images_dir):
@@ -793,7 +844,8 @@ def main():
                         help="Root directory containing session folders (each with images/ and labels/)")
     parser.add_argument("--output-dir", required=True,
                         help="Output directory for UFLDv2-formatted data")
-    parser.add_argument("--num-lanes", type=int, default=10)
+    parser.add_argument("--num-lanes", type=int, default=6,
+                        help="Number of lane slots for assignment (max 6, excluding stop_line)")
     parser.add_argument("--lane-width", type=int, default=16)
     parser.add_argument("--train-ratio", type=float, default=0.8,
                         help="Train split ratio by session directories")
@@ -804,7 +856,7 @@ def main():
     parser.add_argument("--include-stop-lines", action="store_true", default=False,
                         help="Include stop_line annotations")
     parser.add_argument("--class-mode", type=int, choices=[3, 8], default=8,
-                        help="Lane class mode: 8=original lane taxonomy, 3=egoleft/egoright/other_lanes")
+                        help="Lane class mode: 8=original lane taxonomy, 3=egoleft_lane/egoright_lane/other")
     args = parser.parse_args()
 
     global NUM_LANES, HALF_LANES, LANE_DRAW_WIDTH, SKIP_LABELS
@@ -825,7 +877,7 @@ def main():
         d for d in os.listdir(args.input_dir)
         if os.path.isdir(os.path.join(args.input_dir, d))
            and os.path.isdir(os.path.join(args.input_dir, d, "images"))
-           and os.path.isdir(os.path.join(args.input_dir, d, "labels"))
+           and os.path.isdir(os.path.join(args.input_dir, d, "labels_json"))
     ])
 
     train_sessions, valid_sessions, test_sessions = split_sessions_by_ratio(

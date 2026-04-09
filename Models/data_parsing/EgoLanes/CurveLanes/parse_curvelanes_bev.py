@@ -32,6 +32,66 @@ def log_skipped(frame_id, reason):
     skipped_dict[frame_id] = reason
 
 
+def _safe_remove(path: str):
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception as e:
+        warnings.warn(f"Failed to remove file {path}: {e}")
+
+
+def prune_source_frame(dataset_dir: str, frame_id: str, json_data: dict):
+    """
+    Remove invalid source frame artifacts and drop its entry from drivable_path.json payload.
+    """
+    # Remove source assets
+    for ext in (".jpg", ".png"):
+        _safe_remove(os.path.join(dataset_dir, "image", f"{frame_id}{ext}"))
+        _safe_remove(os.path.join(dataset_dir, "mask", f"{frame_id}{ext}"))
+        _safe_remove(os.path.join(dataset_dir, "visualization", f"{frame_id}{ext}"))
+
+    # Remove from source JSON payload
+    json_data.pop(frame_id, None)
+
+
+def _collect_jpg_stems(dirpath: str):
+    if not os.path.isdir(dirpath):
+        return set()
+    return {
+        os.path.splitext(name)[0]
+        for name in os.listdir(dirpath)
+        if name.lower().endswith(".jpg")
+    }
+
+
+def _as_point_list(line_like):
+    """
+    Normalize a lane-like payload into a single polyline [[x,y], ...].
+    Supports either:
+      - direct polyline: [[x,y], ...]
+      - list of polylines: [ [[x,y], ...], ... ]  -> picks longest
+    """
+    if not isinstance(line_like, list) or not line_like:
+        return []
+    first = line_like[0]
+    # Case A: direct polyline
+    if (
+        isinstance(first, (list, tuple))
+        and len(first) >= 2
+        and isinstance(first[0], (int, float))
+        and isinstance(first[1], (int, float))
+    ):
+        return line_like
+    # Case B: list of polylines -> choose the longest valid one
+    best = []
+    for candidate in line_like:
+        if not isinstance(candidate, list):
+            continue
+        if len(candidate) > len(best):
+            best = candidate
+    return best
+
+
 def drawLine(
     img: np.ndarray, 
     line: list,
@@ -81,7 +141,7 @@ def annotateGT(
     cv2.imwrite(
         os.path.join(
             raw_dir,
-            f"{frame_id}.png"
+            f"{frame_id}.jpg"
         ),
         img
     )
@@ -142,11 +202,12 @@ def annotateGT(
     )
 
     # =========================== ORIGINAL VIS =========================== #
+    orig_h, orig_w = orig_img.shape[:2]
 
     # Draw reprojected egopath
     if (normalized):
         renormed_reproj_egopath = [
-            (x * W, y * H) 
+            (x * orig_w, y * orig_h) 
             for x, y in reproj_egopath
         ]
     else:
@@ -160,7 +221,7 @@ def annotateGT(
     # Draw reprojected egoleft
     if (normalized):
         renormed_reproj_egoleft = [
-            (x * W, y * H) 
+            (x * orig_w, y * orig_h) 
             for x, y in reproj_egoleft
         ]
     else:
@@ -174,7 +235,7 @@ def annotateGT(
     # Draw reprojected egoright
     if (normalized):
         renormed_reproj_egoright = [
-            (x * W, y * H) 
+            (x * orig_w, y * orig_h) 
             for x, y in reproj_egoright
         ]
     else:
@@ -202,6 +263,8 @@ def calAngle(line: list[PointCoords]) -> float:
     - Horizontal leftward lane: -90°
     - Horizontal rightward lane: +90°
     """
+    if len(line) < 2:
+        raise ValueError(f"Need at least 2 points to compute angle, got {len(line)}")
     return math.degrees(
         math.atan2(
             line[1][0] - line[0][0],
@@ -301,6 +364,10 @@ def findSourcePointsBEV(
     Find 4 source points for the BEV homography transform.
     """
     sps = {}
+    if len(egoleft) < 2 or len(egoright) < 2:
+        raise ValueError(
+            f"Insufficient ego lane points: egoleft={len(egoleft)}, egoright={len(egoright)}"
+        )
 
     # Renorm 2 egolines
     egoleft = [
@@ -372,13 +439,15 @@ def findSourcePointsBEV(
 def transformBEV(
     img: np.ndarray,
     line: list,
-    sps: dict
+    sps: dict,
+    src_w: int,
+    src_h: int,
 ):
     # Renorm/tuplize drivable path
     line = [
-        (point[0] * W, point[1] * H)
+        (point[0] * src_w, point[1] * src_h)
         for point in line
-        if (point[1] * H >= sps["ego_h"])
+        if (point[1] * src_h >= sps["ego_h"])
     ]
     if (not line):
         return (None, None, None, None, None, None, False)
@@ -481,6 +550,9 @@ def calEgoSide(
             int     # validity, int
     ]]:
 
+    if not bev_egopath:
+        return [], [], [], []
+
     # BEV-egoside
     bev_egoside = []
     for point in bev_egopath:
@@ -551,8 +623,7 @@ if __name__ == "__main__":
         "RE" : [400, 0]             # Right end
     }
 
-    W = 800
-    H = 400
+    # Source frame size is taken from each frame image dynamically.
 
     BEV_W = 640
     BEV_H = 1280
@@ -565,7 +636,7 @@ if __name__ == "__main__":
 
     # SANITY CHECK PARAMS
 
-    EGO_ANCHOR_ANGLE_THRESHOLD = 45         # Degrees
+    EGO_ANCHOR_ANGLE_THRESHOLD = 60         # Degrees
     EGO_ANCHOR_DISTANCE_THRESHOLD = 0.3     # Should not be in 30% left or right
 
     # PARSING ARGS
@@ -574,6 +645,7 @@ if __name__ == "__main__":
         description = "Generating BEV from CurveLanes processed datasets"
     )
     parser.add_argument(
+        "-d",
         "--dataset_dir", 
         type = str, 
         help = "Processed CurveLanes directory",
@@ -581,6 +653,7 @@ if __name__ == "__main__":
     )
     # For debugging only
     parser.add_argument(
+        "-e",
         "--early_stopping",
         type = int,
         help = "Num. frames you wanna limit, instead of whole set.",
@@ -619,16 +692,21 @@ if __name__ == "__main__":
     # MAIN GENERATION LOOP
 
     counter = 0
-    for frame_id, frame_content in json_data.items():
+    frames_to_prune = set()
+    for frame_id, frame_content in list(json_data.items()):
 
         counter += 1
 
         # Acquire frame
         frame_img_path = os.path.join(
             IMG_DIR,
-            f"{frame_id}.png"
+            f"{frame_id}.jpg"
         )
         img = cv2.imread(frame_img_path)
+        if img is None:
+            log_skipped(frame_id, f"Failed to read image: {frame_img_path}")
+            continue
+        frame_h, frame_w = img.shape[:2]
 
         # Acquire frame data
         this_frame_data = json_data[frame_id]
@@ -636,12 +714,33 @@ if __name__ == "__main__":
         # MAIN ALGORITHM
 
         try:
+            drivable_path = _as_point_list(this_frame_data.get("drivable_path", []))
+            egoleft_lane = _as_point_list(this_frame_data.get("egoleft_lane", []))
+            egoright_lane = _as_point_list(this_frame_data.get("egoright_lane", []))
+
+            if len(drivable_path) < 2:
+                reason = f"Insufficient drivable_path points: {len(drivable_path)}"
+                log_skipped(frame_id, reason)
+                frames_to_prune.add(frame_id)
+                prune_source_frame(dataset_dir, frame_id, json_data)
+                continue
+            if len(egoleft_lane) < 2 or len(egoright_lane) < 2:
+                reason = (
+                    "Insufficient ego lane points before BEV transform: "
+                    f"egoleft_lane={len(egoleft_lane)}, "
+                    f"egoright_lane={len(egoright_lane)}"
+                )
+                log_skipped(frame_id, reason)
+                frames_to_prune.add(frame_id)
+                prune_source_frame(dataset_dir, frame_id, json_data)
+                continue
+
             # Get source points for transform
             sps_dict = findSourcePointsBEV(
-                h = H,
-                w = W,
-                egoleft = this_frame_data["egoleft_lane"],
-                egoright = this_frame_data["egoright_lane"]
+                h = frame_h,
+                w = frame_w,
+                egoleft = egoleft_lane,
+                egoright = egoright_lane
             )
 
             # Transform to BEV space
@@ -658,8 +757,10 @@ if __name__ == "__main__":
                 success_egopath
             ) = transformBEV(
                 img = img,
-                line = this_frame_data["drivable_path"],
-                sps = sps_dict
+                line = drivable_path,
+                sps = sps_dict,
+                src_w = frame_w,
+                src_h = frame_h,
             )
 
             # Egoleft
@@ -797,8 +898,8 @@ if __name__ == "__main__":
                     round_line_floats(
                         normalizeCoords(
                             orig_bev_egopath,
-                            width = W,
-                            height = H
+                            width = frame_w,
+                            height = frame_h
                         )
                     ), 
                     egopath_flag_list, 
@@ -825,8 +926,8 @@ if __name__ == "__main__":
                     round_line_floats(
                         normalizeCoords(
                             orig_bev_egoleft,
-                            width = W,
-                            height = H
+                            width = frame_w,
+                            height = frame_h
                         )
                     ), 
                     egoleft_flag_list, 
@@ -853,8 +954,8 @@ if __name__ == "__main__":
                     round_line_floats(
                         normalizeCoords(
                             orig_bev_egoright,
-                            width = W,
-                            height = H
+                            width = frame_w,
+                            height = frame_h
                         )
                     ), 
                     egoright_flag_list, 
@@ -869,9 +970,37 @@ if __name__ == "__main__":
             if (counter >= early_stopping):
                 break
 
-    # Save master data
+    # Save master data (BEV labels)
     with open(BEV_JSON_PATH, "w") as f:
         json.dump(data_master, f, indent = 4)
+
+    # Reconcile source dataset with BEV outputs when full run is requested.
+    # (Avoid pruning unprocessed tail when early stopping is used.)
+    if early_stopping is None:
+        bev_json_ids = set(data_master.keys())
+        bev_img_ids = _collect_jpg_stems(BEV_IMG_DIR)
+        bev_vis_stems = _collect_jpg_stems(BEV_VIS_DIR)
+        bev_vis_ids = {s for s in bev_vis_stems if not s.endswith("_orig")}
+        bev_vis_orig_ids = {s[:-5] for s in bev_vis_stems if s.endswith("_orig")}
+
+        consistent_bev_ids = bev_json_ids & bev_img_ids & bev_vis_ids & bev_vis_orig_ids
+        source_ids = set(json_data.keys())
+        reconcile_prune_ids = sorted(source_ids - consistent_bev_ids)
+        if reconcile_prune_ids:
+            for fid in reconcile_prune_ids:
+                prune_source_frame(dataset_dir, fid, json_data)
+                log_skipped(fid, "Pruned by BEV reconciliation (missing in BEV image/vis/json outputs).")
+            frames_to_prune.update(reconcile_prune_ids)
+            print(
+                f"Reconciliation pruned {len(reconcile_prune_ids)} source frames "
+                f"missing from BEV outputs."
+            )
+
+    # Persist pruned source JSON if any frame was removed.
+    if frames_to_prune:
+        with open(JSON_PATH, "w") as f:
+            json.dump(json_data, f, indent=4)
+        print(f"Pruned {len(frames_to_prune)} invalid source frames from dataset and drivable_path.json.")
 
     # Save skipped frames
     with open(BEV_SKIPPED_JSON_PATH, "w") as f:
