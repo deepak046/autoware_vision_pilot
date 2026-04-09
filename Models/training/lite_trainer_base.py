@@ -356,7 +356,8 @@ class LiteTrainerBase(ABC):
         self.head_cfg = self.network_cfg.get("head", {})
         
         #modify the name of the backbone type from efficientnet_b0 to timm-efficientnet-b0
-        if "timm" not in self.backbone_cfg["type"]:
+        backbone_type = self.backbone_cfg["type"]
+        if ("timm" not in backbone_type) and (not backbone_type.lower().startswith("resnet")):
             self.backbone_cfg["type"] = "timm-" + self.backbone_cfg["type"].replace("_", "-")
         return 
 

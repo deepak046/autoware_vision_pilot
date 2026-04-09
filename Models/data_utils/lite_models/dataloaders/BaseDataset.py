@@ -7,7 +7,7 @@ from Models.data_utils.lite_models.augmentation.factory import build_aug
 # RGB colors per lane class (must match process_curvelanes.LANE_CLASS_SEMANTIC_RGB).
 # Channel order: continuous_white_line, continuous_yellow_line, dashed_white_line,
 # double_white_lines, double_yellow_lines, curb_line, stop_line, invisible_line.
-LANE_CLASS_RGB_PALETTE = [
+LANE_CLASS_RGB_PALETTE_8 = [
     (240, 240, 240),
     (0, 255, 255),
     (200, 200, 200),
@@ -16,6 +16,12 @@ LANE_CLASS_RGB_PALETTE = [
     (0, 140, 255),
     (0, 0, 255),
     (128, 128, 128),
+]
+
+LANE_CLASS_RGB_PALETTE_3 = [
+    (0, 255, 255),
+    (255, 0, 200),
+    (0, 255, 145),
 ]
 
 
@@ -31,7 +37,16 @@ def rgb_semantic_mask_to_C_channels(rgb: np.ndarray, num_channels: int) -> np.nd
         )
     h, w = rgb.shape[:2]
     out = np.zeros((h, w, num_channels), dtype=np.uint8)
-    for i, color in enumerate(LANE_CLASS_RGB_PALETTE):
+    if num_channels == 3:
+        palette = LANE_CLASS_RGB_PALETTE_3
+    elif num_channels == 8:
+        palette = LANE_CLASS_RGB_PALETTE_8
+    elif num_channels == 1:
+        palette = [(255, 0, 0)]
+    else:
+        raise ValueError(f"[BaseDataset] Expected 3 or 8 channels, got {num_channels}")
+
+    for i, color in enumerate(palette):
         col = np.array(color, dtype=np.uint8)
         match = np.all(rgb == col, axis=-1)
         out[:, :, i] = match.astype(np.uint8)
