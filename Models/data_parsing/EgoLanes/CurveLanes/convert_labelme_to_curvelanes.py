@@ -721,7 +721,7 @@ def process_split_sessions(input_dir, output_dir, split_name, sessions, row_anch
 
     for session in sessions:
         session_path = os.path.join(input_dir, session)
-        json_dir = os.path.join(session_path, "labels_json")
+        json_dir = os.path.join(session_path, "labels")
         images_dir = os.path.join(session_path, "images")
 
         if not os.path.isdir(json_dir) or not os.path.isdir(images_dir):
@@ -857,6 +857,8 @@ def main():
                         help="Include stop_line annotations")
     parser.add_argument("--class-mode", type=int, choices=[3, 8], default=8,
                         help="Lane class mode: 8=original lane taxonomy, 3=egoleft_lane/egoright_lane/other")
+    parser.add_argument("--json-name", type=str, choices=["labels", "labels_json"], default="labels",
+                        help="Name of the json file: labels for remote, labels_json for local")
     args = parser.parse_args()
 
     global NUM_LANES, HALF_LANES, LANE_DRAW_WIDTH, SKIP_LABELS
@@ -877,7 +879,7 @@ def main():
         d for d in os.listdir(args.input_dir)
         if os.path.isdir(os.path.join(args.input_dir, d))
            and os.path.isdir(os.path.join(args.input_dir, d, "images"))
-           and os.path.isdir(os.path.join(args.input_dir, d, "labels_json"))
+           and os.path.isdir(os.path.join(args.input_dir, d, args.json_name))
     ])
 
     train_sessions, valid_sessions, test_sessions = split_sessions_by_ratio(

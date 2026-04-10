@@ -29,8 +29,8 @@ def main():
     # ====================== Loading datasets ====================== #
 
     # Root
-    ROOT_PATH   = "/home/deepak/Desktop/qtpie/lane_detection_classification/autoware_vision_pilot/data/Curvelanes_wo_label/processed"
-    POV_PATH    = "/home/deepak/Desktop/qtpie/lane_detection_classification/autoware_vision_pilot"
+    ROOT_PATH   = "/home/new_user/Desktop/shared-data/Line/Training/Train_Lane_Detection/Line_Annotations_New/curvelane_complete_no_label/Curvelanes_bev_3class/processed"
+    POV_PATH    = "/home/new_user/qtpie/lane_detection/autoware_vision_pilot/"
 
     # Model save root path
     MODEL_SAVE_ROOT_PATH = os.path.join(

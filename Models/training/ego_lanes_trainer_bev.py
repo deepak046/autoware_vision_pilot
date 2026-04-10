@@ -215,10 +215,10 @@ class EgoLanesTrainerBev():
         egolanes_tensor = egolanes_tensor.unsqueeze(0)
         self.egolanes_tensor = egolanes_tensor.to(self.device)
 
-        # Reducing size of Egolanes Segmentation to 1/4
-        reduction = nn.MaxPool2d(2, stride=2)
-        self.egolanes_tensor = reduction(self.egolanes_tensor)
-        self.egolanes_tensor = reduction(self.egolanes_tensor)
+        # # Reducing size of Egolanes Segmentation to 1/4
+        # reduction = nn.MaxPool2d(2, stride=2)
+        # self.egolanes_tensor = reduction(self.egolanes_tensor)
+        # self.egolanes_tensor = reduction(self.egolanes_tensor)
 
         # Data Tensor
         data_tensor = torch.from_numpy(self.data)
@@ -259,6 +259,14 @@ class EgoLanesTrainerBev():
     def run_model(self):
         
         self.pred_binary_seg_tensor = self.model(self.perspective_image_tensor)
+
+        if self.pred_binary_seg_tensor.shape[-2:] != self.egolanes_tensor.shape[-2:]:
+            self.pred_binary_seg_tensor = nn.functional.interpolate(
+                self.pred_binary_seg_tensor,
+                size=self.egolanes_tensor.shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
 
         # Segmentation Loss
         self.total_loss = self.calc_ego_lanes_loss()
@@ -656,16 +664,8 @@ class EgoLanesTrainerBev():
         alpha = 0.5
 
         # Creating visualization image
-        # vis_predict_object = np.zeros((320, 640, 3), dtype = "uint8")
         vis_predict_object = np.array(self.perspective_image)
-        vis_predict_object = cv2.resize(vis_predict_object, (160, 80))
-        # gt_object = np.zeros((320, 640, 3), dtype = "uint8")
         gt_object = np.array(self.perspective_image)
-        gt_object = cv2.resize(gt_object, (160, 80))
-
-        # Creating raw visualization images
-        vis_raw_predict_object = np.zeros((80, 160, 3), dtype = "uint8")
-        gt_raw_object = np.zeros((80, 160, 3), dtype = "uint8")
 
         # Prediction
         egolanes_prediction = torch.squeeze(self.pred_binary_seg_tensor, 0)
@@ -676,6 +676,38 @@ class EgoLanesTrainerBev():
         egolanes_gt = torch.squeeze(self.egolanes_tensor, 0)
         egolanes_gt = torch.squeeze(egolanes_gt, 0)
         egolanes_gt = egolanes_gt.cpu().detach().numpy()
+
+        _h, _w = vis_predict_object.shape[0], vis_predict_object.shape[1]
+
+        if egolanes_prediction.shape[1:] != (_h, _w):
+            egolanes_prediction = np.stack(
+                [
+                    cv2.resize(
+                        egolanes_prediction[c].astype(np.float32),
+                        (_w, _h),
+                        interpolation=cv2.INTER_NEAREST,
+                    )
+                    for c in range(egolanes_prediction.shape[0])
+                ],
+                axis=0,
+            )
+
+        if egolanes_gt.shape[1:] != (_h, _w):
+            egolanes_gt = np.stack(
+                [
+                    cv2.resize(
+                        egolanes_gt[c].astype(np.float32),
+                        (_w, _h),
+                        interpolation=cv2.INTER_NEAREST,
+                    )
+                    for c in range(egolanes_gt.shape[0])
+                ],
+                axis=0,
+            )
+
+        # Creating raw visualization images
+        vis_raw_predict_object = np.zeros((_h, _w, 3), dtype = "uint8")
+        gt_raw_object = np.zeros((_h, _w, 3), dtype = "uint8")
         
         # Getting prediction and ground truth labels
         pred_egoleft_lanes = np.where(egolanes_prediction[0,:,:] > 0)
@@ -730,18 +762,6 @@ class EgoLanesTrainerBev():
         gt_raw_object[gt_other_lanes[0], gt_other_lanes[1], 0] = 0
         gt_raw_object[gt_other_lanes[0], gt_other_lanes[1], 1] = 255
         gt_raw_object[gt_other_lanes[0], gt_other_lanes[1], 2] = 145
-
-        # Upsample vis predict and gt objects
-        vis_predict_object = cv2.resize(
-            vis_predict_object,
-            (640, 320),
-            interpolation = cv2.INTER_NEAREST
-        )
-        gt_object = cv2.resize(
-            gt_object,
-            (640, 320),
-            interpolation = cv2.INTER_NEAREST
-        )
 
         # Alpha blended visualization
         prediction_vis = cv2.addWeighted(vis_predict_object, \
