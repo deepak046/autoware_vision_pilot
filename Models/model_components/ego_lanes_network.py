@@ -4,6 +4,7 @@ from .auto_steer_context import AutoSteerContext
 from .ego_path_neck import EgoPathNeck
 from .ego_lanes_head import EgoLanesHead
 
+import segmentation_models_pytorch as smp
 
 import torch.nn as nn
 
@@ -35,3 +36,22 @@ class EgoLanesNetwork(nn.Module):
         ego_lanes = self.EgoLanesHead(neck)
 
         return ego_lanes
+
+class SegFormerNetwork(nn.Module):
+    def __init__(self):
+        super(SegFormerNetwork, self).__init__()
+
+        self.model = smp.Segformer(
+            encoder_name="mit_b2",
+            encoder_depth=5,
+            encoder_weights='imagenet',
+            decoder_segmentation_channels=256,
+            in_channels=3,
+            classes=3,
+            # Keep logits here; trainer uses BCEWithLogitsLoss.
+            activation=None,
+            upsampling=4,
+        )
+
+    def forward(self, image):
+        return self.model(image)

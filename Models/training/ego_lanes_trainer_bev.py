@@ -11,7 +11,7 @@ import cv2
 from typing import Literal, get_args
 import sys
 
-from Models.model_components.ego_lanes_network import EgoLanesNetwork
+from Models.model_components.ego_lanes_network import EgoLanesNetwork, SegFormerNetwork
 from Models.data_utils.augmentations import Augmentations
 from Models.data_utils.load_data_ego_lanes import VALID_DATASET_LIST
 
@@ -261,11 +261,10 @@ class EgoLanesTrainerBev():
         self.pred_binary_seg_tensor = self.model(self.perspective_image_tensor)
 
         if self.pred_binary_seg_tensor.shape[-2:] != self.egolanes_tensor.shape[-2:]:
-            self.pred_binary_seg_tensor = nn.functional.interpolate(
-                self.pred_binary_seg_tensor,
-                size=self.egolanes_tensor.shape[-2:],
-                mode="bilinear",
-                align_corners=False,
+            raise ValueError(
+                f"Prediction resolution {self.pred_binary_seg_tensor.shape[-2:]} "
+                f"does not match GT resolution {self.egolanes_tensor.shape[-2:]}. "
+                "Make network outputs match natively."
             )
 
         # Segmentation Loss
