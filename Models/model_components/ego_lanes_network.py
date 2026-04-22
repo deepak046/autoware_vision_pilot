@@ -55,3 +55,23 @@ class SegFormerNetwork(nn.Module):
 
     def forward(self, image):
         return self.model(image)
+
+class UNetPlusPlusNetwork(nn.Module):
+    def __init__(self):
+        super(UNetPlusPlusNetwork, self).__init__()
+
+        self.model = smp.UnetPlusPlus(
+            encoder_name="efficientnet-b0",
+            encoder_depth=5,
+            encoder_weights='imagenet',
+            decoder_channels=(256, 128, 64, 32, 16),
+            decoder_attention_type="scse",
+            decoder_interpolation="bilinear",
+            in_channels=3,
+            classes=3,
+            activation=None,
+            upsampling=4,
+        )
+
+    def forward(self, image):
+        return self.model(image)

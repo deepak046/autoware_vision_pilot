@@ -13,11 +13,11 @@ try:
 except AttributeError:
     warnings.simplefilter("ignore", np.RankWarning)
 
-NUM_LANES = 10
+NUM_LANES = 6
 HALF_LANES = NUM_LANES // 2
 IMG_WIDTH = 1920
 IMG_HEIGHT = 1080
-LANE_DRAW_WIDTH = 16
+LANE_DRAW_WIDTH = 30
 MIN_LANE_LENGTH = 80
 ROW_ANCHOR_START = 400 # 64 row anchors
 ROW_ANCHOR_END = 1080
@@ -706,9 +706,15 @@ def process_split_sessions(input_dir, output_dir, split_name, sessions, row_anch
             img_rel = f"images/{out_name}.jpg"
             label_rel = f"labels/{out_name}.lines.json"
 
+            # Filter out images that have less than 2 lanes
+            if len(shapes) < 2:
+                continue
+
             bin_label, seg_mask, points, slot_raw_pts, num_valid, slot_labels = process_one_image(
                 shapes, img_h, img_w, row_anchors
             )
+            if sum(bin_label) < 2:
+                continue
             lines_payload = shapes_to_curvelanes_lines(shapes, img_width=img_w)
 
             img = cv2.imread(img_path)
@@ -793,7 +799,7 @@ def main():
                         help="Root directory containing session folders (each with images/ and labels/)")
     parser.add_argument("--output-dir", required=True,
                         help="Output directory for UFLDv2-formatted data")
-    parser.add_argument("--num-lanes", type=int, default=10)
+    parser.add_argument("--num-lanes", type=int, default=6)
     parser.add_argument("--lane-width", type=int, default=16)
     parser.add_argument("--train-ratio", type=float, default=0.8,
                         help="Train split ratio by session directories")

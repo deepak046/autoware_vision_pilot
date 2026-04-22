@@ -680,7 +680,7 @@ def main() -> None:
         help="Visualization mode (default: lines)",
     )
     parser.add_argument(
-        "--save_lane_lines_json", default=True, type=bool,
+        "--save_lane_lines_json", action="store_true",
         help="Include fitted lane polylines in the JSONL output (can be large)",
     )
     parser.add_argument(

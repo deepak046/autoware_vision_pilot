@@ -4,9 +4,8 @@ from argparse import ArgumentParser
 from Models.model_components.scene_seg_network import SceneSegNetwork
 from Models.model_components.scene_3d_network import Scene3DNetwork
 from Models.model_components.domain_seg_network import DomainSegNetwork
-from Models.model_components.ego_lanes_network import EgoLanesNetwork
+from Models.model_components.ego_lanes_network import EgoLanesNetwork, UNetPlusPlusNetwork
 from Models.inference.ego_lanes_lite_infer import EgoLanesLiteInferModel
-
 
 ##
 ## Example Usage: "python3 traced_script_module_save.py -n SceneSeg -p _checkpoint_file_.pth  -o _output_trace_file.pt"
@@ -53,7 +52,10 @@ def main():
     elif (model_name == 'EgoLanes'):
         print('Processing EgoPath Network')
         sceneSegNetwork = SceneSegNetwork()
-        model = EgoLanesNetwork(sceneSegNetwork)
+        # model = EgoLanesNetwork()
+        # model.load_state_dict(torch.load(model_checkpoint_path, weights_only=True, map_location=device))
+        model = UNetPlusPlusNetwork()
+        model.load_state_dict(torch.load(model_checkpoint_path, weights_only=True, map_location=device))
     elif (model_name == 'DomainSeg'):
         print('Processing DomainSeg Network')
         sceneSegNetwork = SceneSegNetwork()

@@ -11,7 +11,7 @@ import cv2
 from typing import Literal, get_args
 import sys
 
-from Models.model_components.ego_lanes_network import EgoLanesNetwork, SegFormerNetwork
+from Models.model_components.ego_lanes_network import EgoLanesNetwork, SegFormerNetwork, UNetPlusPlusNetwork
 from Models.data_utils.augmentations import Augmentations
 from Models.data_utils.load_data_ego_lanes import VALID_DATASET_LIST
 
@@ -89,7 +89,7 @@ class EgoLanesTrainerBev():
         print(f"Using {self.device} for inference.")
 
         # Instantiate model
-        self.model = EgoLanesNetwork()
+        self.model = UNetPlusPlusNetwork()
         
         if(checkpoint_path):
             print("Loading trained AutoSteer model from checkpoint")

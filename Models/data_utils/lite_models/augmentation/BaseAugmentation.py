@@ -69,18 +69,25 @@ class BaseAugmentation(ABC):
         
 
         p = (path or "").lower()
-        cut = None
-        if "acdc" in p: cut = 990
-        elif "muses" in p: cut = 918
-        elif "idda" in p: cut = 950
-        elif "bdd100k" in p: cut = 640
+        cut_bottom = None
+        cut_top = None
+        if "acdc" in p:
+            cut_top, cut_bottom = 0, 990
+        elif "muses" in p:
+            cut_top, cut_bottom = 0, 918
+        elif "idda" in p:
+            cut_top, cut_bottom = 0, 950
+        elif "bdd100k" in p:
+            cut_top, cut_bottom = 0, 640
+        elif "curvelanes" in p:
+            cut_top, cut_bottom = 160, 960 
 
-        if cut is None:
+        if cut_top is None or cut_bottom is None:
             return image, gt
 
-        image = image[:cut]
+        image = image[cut_top:cut_bottom]
         if gt is not None:
-            gt = gt[:cut]
+            gt = gt[cut_top:cut_bottom]
         return image, gt
 
     # =========================

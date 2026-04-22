@@ -400,8 +400,8 @@ def annotateGT(
         new_img_width -= (CROP_LEFT + CROP_RIGHT)
 
 
-    assert new_img_width == 1024, f"Unexpected width: {new_img_width}"
-    assert new_img_height == 640, f"Unexpected height: {new_img_height}"
+    assert new_img_width in (1024, 1440, 1920), f"Unexpected width: {new_img_width}"
+    assert new_img_height in (640, 810, 1080), f"Unexpected height: {new_img_height}"
 
 
 
@@ -626,10 +626,10 @@ if __name__ == "__main__":
     #   width : remove 416 -> 208 left / 208 right
     #   height: remove 170  -> 85 top / 85 bottom
     CROP_NORMAL = {
-        "TOP": 85,
-        "RIGHT": 208,
-        "BOTTOM": 85,
-        "LEFT": 208,
+        "TOP": 0,
+        "RIGHT": 0,
+        "BOTTOM": 0,
+        "LEFT": 0,
     }
 
 
@@ -747,8 +747,8 @@ if __name__ == "__main__":
                     resize = None
                     crop = CROP_WEIRD
                 elif (init_img_size == SIZE_DICT["normal"]):
-                    resize = 0.75
-                    crop = CROP_NORMAL
+                    resize = None
+                    crop = None
 
                 anno_path = img_path.replace(".jpg", ".lines.json").replace(IMG_DIR, LABEL_DIR)
 

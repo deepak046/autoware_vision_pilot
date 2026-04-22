@@ -1,11 +1,11 @@
 experiment:
   name: "complete_unet_8class_fcn_skip_cbam_batch8_sigmoid_0.5_cross"
-  output_dir: "runs/training/EgoLanesLite_8class/"
+  output_dir: "runs/training/EgoLanesLite_8class_no_crop/"
   seed: 42
   device: "cuda"    # "cuda", "cuda:0", or "cpu"
   wandb:
     enabled: true
-    project_name: "EgoLanesLite_8class"     #it is fixed from the account
+    project_name: "EgoLanesLite_8class_no_crop"     #it is fixed from the account
 
 checkpoint:
   load_from:   # path to checkpoint to load before training
@@ -13,13 +13,13 @@ checkpoint:
 
 dataset:
   training_sets: ["curvelanes"]    # <--- LIST OF DATASETS TO USE FOR TRAIN
-  curvelanes_root: "/home/new_user/Desktop/shared-data/Line/Training/Train_Lane_Detection/Line_Annotations_New/curvelane_complete_label/"
+  curvelanes_root: "/home/new_user/Desktop/shared-data/Line/Training/Train_Lane_Detection/Line_Annotations_New/curvelane_complete_label_no_crop/"
 
   validation_sets: ["curvelanes"]    # <--- LIST OF DATASETS TO USE FOR VALIDATION
 
   #augmentations settings for all datasets
   augmentations:
-    remove_car_hood: false
+    remove_car_hood: true # removes top by 160px and bottom by 120px (1080 → 800), then resized to 800x320
     output_channels: 8
     normalize:
       enabled: true
@@ -123,7 +123,7 @@ network:
   #   pooling: "avg"    # "avg" | "max"
   #   activation: "relu"    # "relu" | "elu" | "leaky_relu" | "tanh" | "sigmoid" | "none"
   #load a pretrained model to use as backbone (also as decoder if specified)
-  # pretrained_model_path: "/home/new_user/qtpie/lane_detection/autoware_vision_pilot/runs/training/EgoLanesLite_8class/complete_light_aug_8class_fcn_skip_cbam_square_blobs/best_epoch_6.pth"
+  pretrained_model_path: "/home/new_user/qtpie/lane_detection/autoware_vision_pilot/runs/training/EgoLanesLite_8class_no_crop/complete_unet_med-att_fsc_batch8_sigmoid_0.5_cross/checkpoints/best.pth"
 
   backbone:
     type: "efficientnet_b0"  # e.g., "resnet50", "efficientnet_b0", etc.
@@ -153,9 +153,9 @@ network:
     freeze_decoder: false    # whether to freeze decoder weights during training
 
     #for unetplusplus
-    unetplusplus_decoder_channels: [128, 64, 32, 16, 8] # light: [128, 64, 32, 16, 8], heavy: [512, 256, 128, 64, 32]
+    unetplusplus_decoder_channels: [128, 64, 32, 16, 8] # light: [128, 64, 32, 16, 8], medium: [256, 128, 64, 32, 16], heavy: [512, 256, 128, 64, 32]
     decoder_interpolation: "bilinear" # "nearest" | "bilinear"
-    # decoder_attention: "" # "" | "scse"
+    # decoder_attention: ""  # "None" | "scse"
 
   head:
     head_activation: null
