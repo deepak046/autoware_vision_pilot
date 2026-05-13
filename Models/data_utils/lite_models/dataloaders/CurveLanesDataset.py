@@ -2,6 +2,12 @@
 
 import os
 import glob
+import json
+from collections import Counter
+from typing import Dict, Iterable, List, Optional, Set, Tuple
+
+import cv2
+import numpy as np
 
 from Models.data_utils.lite_models.dataloaders.BaseDataset import BaseDataset
 
@@ -23,6 +29,30 @@ Example:
     mask/000123.png
 """
 
+LANE_CLASSES_9 = [
+    "continuous_white_line",
+    "continuous_yellow_line",
+    "dashed_white_line",
+    "double_white_lines",
+    "double_yellow_lines",
+    "curb_line",
+    "stop_line",
+    "invisible_line",
+    "Occluded_curb_lines",
+]
+LANE_CLASS_TO_ID_9 = {name: idx for idx, name in enumerate(LANE_CLASSES_9)}
+LANE_RGB_PALETTE_9 = [
+    (240, 240, 240),
+    (0, 255, 255),
+    (200, 200, 200),
+    (220, 220, 220),
+    (0, 220, 255),
+    (0, 140, 255),
+    (0, 0, 255),
+    (128, 128, 128),
+    (255, 0, 255),
+]
+
 class CurveLanesDataset(BaseDataset):
 
     def __init__(
@@ -32,6 +62,7 @@ class CurveLanesDataset(BaseDataset):
         mode: str = "train",
         data_type: str = "LANE_DETECTION",
         pseudo_labeling: bool = False,
+        annotated_lane_classes: Optional[Dict[str, List[str]]] = None,
     ):
         super().__init__(
             dataset_root,
@@ -53,6 +84,7 @@ class CurveLanesDataset(BaseDataset):
 
         self.split = mode.lower()   # "train" | "val" | "test"
         self.dataset_name = "Curvelanes"
+        self.annotated_lane_classes: Dict[str, List[str]] = {}
 
         if self.data_type != "LANE_DETECTION":
             raise ValueError(
@@ -60,15 +92,19 @@ class CurveLanesDataset(BaseDataset):
                 "Only 'LANE_DETECTION' is supported."
             )
 
+        # Dict of annotated lane classes within each image
+        if annotated_lane_classes is not None:
+            self.annotated_lane_classes = annotated_lane_classes
+
         # ---- Build file list ----
         self.samples = self._build_file_list()
 
     # ------------------------------------------------------------
     # Build file list 
     # ------------------------------------------------------------
-    def _build_file_list(self):
+    def _build_file_list(self) -> List[Tuple[str, str]]:
 
-        MAX_VAL_SAMPLES = 500       #limit max number of validation samples to 500 (otherwise they would be )
+        MAX_VAL_SAMPLES = 2000       #limit max number of validation samples to 500 (otherwise they would be )
 
         """
         Build file list for CurveLanes dataset.:
@@ -141,3 +177,107 @@ class CurveLanesDataset(BaseDataset):
             )
 
         return samples
+
+    def _present_class_ids_from_mask(self, mask_path: str) -> Set[int]:
+        """Extract present class ids from precomputed per-image class metadata."""
+        basename = os.path.splitext(os.path.basename(mask_path))[0]
+        candidate_keys = (f"{basename}.jpg", f"{basename}.png", basename)
+        class_names: Optional[List[str]] = None
+        for key in candidate_keys:
+            if key in self.annotated_lane_classes:
+                class_names = self.annotated_lane_classes[key]
+                break
+
+        if class_names is None:
+            return set()
+
+        present_ids: Set[int] = set()
+        for class_name in class_names:
+            if class_name in LANE_CLASS_TO_ID_9:
+                present_ids.add(LANE_CLASS_TO_ID_9[class_name])
+            else:
+                print(
+                    f"[CurveLanesDataset] WARNING: Unknown lane class '{class_name}' "
+                    f"in annotated_lane_classes for '{basename}'."
+                )
+        return present_ids
+
+    def build_sample_weights(
+        self,
+        class_weights: Dict[str, float],
+        min_weight: float = 1.0,
+    ) -> List[float]:
+        """Build per-sample weights for `WeightedRandomSampler`.
+
+        Weight rule (requested):
+            sample_weight = max(weight[c] for c in classes_present_in_image)
+        No multiplicative stacking is used when multiple rare classes are present.
+
+        Args:
+            class_weights: Class->weight dictionary. Keys should follow `LANE_CLASSES_9`.
+            min_weight: Default/floor weight for images where no configured class is found.
+
+        Returns:
+            List of weights aligned with `self.samples` order.
+        """
+        if min_weight <= 0:
+            raise ValueError(f"[CurveLanesDataset] min_weight must be > 0, got {min_weight}")
+
+        raw_weights: Dict[int, float] = {}
+        for class_name, weight in class_weights.items():
+            if class_name not in LANE_CLASS_TO_ID_9:
+                print(
+                    f"[CurveLanesDataset] WARNING: Unknown class '{class_name}' in class_weights; skipping."
+                )
+                continue
+            weight_value = float(weight)
+            if weight_value <= 0:
+                print(
+                    f"[CurveLanesDataset] WARNING: Non-positive weight for '{class_name}' ({weight_value}); skipping."
+                )
+                continue
+            raw_weights[LANE_CLASS_TO_ID_9[class_name]] = weight_value
+
+        if not raw_weights:
+            raise ValueError(
+                "[CurveLanesDataset] No valid class weights provided. "
+                "Expected keys from 9-class taxonomy with positive values."
+            )
+
+        weight_sum = float(sum(raw_weights.values()))
+        if weight_sum <= 0:
+            raise ValueError(
+                f"[CurveLanesDataset] Invalid weight sum ({weight_sum}). "
+                "All class weights must be positive."
+            )
+        normalized_weights = {
+            class_id: weight_value / weight_sum for class_id, weight_value in raw_weights.items()
+        }
+        normalized_min_weight = float(min_weight) / weight_sum
+
+        sample_weights: List[float] = []
+        per_class_presence: Counter = Counter()
+        for _img_path, gt_path in self.samples:
+            present_ids = self._present_class_ids_from_mask(gt_path)
+            candidate_weights = [
+                normalized_weights[class_id]
+                for class_id in present_ids
+                if class_id in normalized_weights
+            ]
+            sample_weight = max(candidate_weights) if candidate_weights else normalized_min_weight
+            sample_weights.append(sample_weight)
+
+            for class_id in present_ids:
+                per_class_presence[LANE_CLASSES_9[class_id]] += 1
+
+        print(
+            f"[CurveLanesDataset] Weighted sampling metadata ready: {len(sample_weights)} samples."
+        )
+        print(
+            f"[CurveLanesDataset] Present-class coverage: "
+            + ", ".join(
+                f"{class_name}={per_class_presence.get(class_name, 0)}"
+                for class_name in LANE_CLASSES_9
+            )
+        )
+        return sample_weights

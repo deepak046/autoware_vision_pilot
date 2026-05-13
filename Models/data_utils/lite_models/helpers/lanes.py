@@ -30,6 +30,17 @@ LANE_CLASS_NAMES_8 = [
     "stop_line",
     "invisible_line",
 ]
+LANE_CLASS_NAMES_9 = [
+    "continuous_white_line",
+    "continuous_yellow_line",
+    "dashed_white_line",
+    "double_white_lines",
+    "double_yellow_lines",
+    "curb_line",
+    "stop_line",
+    "invisible_line",
+    "Occluded_curb_lines",
+]
 LANE_CLASS_COLORS_RGB_8 = [
     (240, 240, 240),
     (0, 255, 255),
@@ -39,6 +50,17 @@ LANE_CLASS_COLORS_RGB_8 = [
     (0, 140, 255),
     (0, 0, 255),
     (128, 128, 128),
+]
+LANE_CLASS_COLORS_RGB_9 = [
+    (240, 240, 240),
+    (0, 255, 255),
+    (200, 200, 200),
+    (220, 220, 220),
+    (0, 220, 255),
+    (0, 140, 255),
+    (0, 0, 255),
+    (128, 128, 128),
+    (255, 0, 255),
 ]
 
 LANE_CLASS_COLORS_INFER_RGB_8 = [
@@ -51,6 +73,19 @@ LANE_CLASS_COLORS_INFER_RGB_8 = [
     (255, 165, 0),    # orange
     (255, 0, 0),      # red
     (255, 255, 255),    # white
+]
+
+LANE_CLASS_COLORS_INFER_RGB_9 = [
+    # Brighter, high-contrast palette for inference overlays.
+    (0, 128, 255),  # bright blue
+    (0, 255, 255),    # cyan
+    (255, 255, 0),    # yellow
+    (255, 0, 255),    # magenta
+    (0, 255, 0),      # green
+    (255, 165, 0),    # orange
+    (255, 0, 0),      # red
+    (255, 255, 255),    # white
+    (0, 0, 128),        # deep navy blue - mutually exclusive color for 9th class
 ]
 
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
@@ -161,6 +196,27 @@ def apply_lane_colors_rgb_8class(canvas: np.ndarray, mask8: np.ndarray, use_infe
         out[ys, xs, :] = color
     return out
 
+def apply_lane_colors_rgb_9class(canvas: np.ndarray, mask9: np.ndarray, use_inference_colors: bool = False) -> np.ndarray:
+    """
+    canvas: HxWx3 uint8 RGB
+    mask9: HxWx9 bool — multi-label or one-hot; paints class colors (later indices
+    overwrite earlier on overlaps).
+    """
+
+    if use_inference_colors:
+        colors = LANE_CLASS_COLORS_INFER_RGB_9
+    else:
+        colors = LANE_CLASS_COLORS_RGB_9
+    out = canvas.copy()
+    if mask9.dtype != np.bool_:
+        if mask9.max() > 1.5:
+            mask9 = mask9 > 127
+        else:
+            mask9 = mask9 > 0.5
+    for i, color in enumerate(colors):
+        ys, xs = np.where(mask9[..., i])
+        out[ys, xs, :] = color
+    return out
 
 def tensor_maskC_to_numpy(maskC_chw: torch.Tensor, threshold: float = 0.5) -> np.ndarray:
     """
@@ -222,6 +278,15 @@ def make_lane_vis_pair_C_class(
             )
         pred_colored = apply_lane_colors_rgb_8class(base_img_small, pred_mask8)
         gt_colored = apply_lane_colors_rgb_8class(base_img_small, gt_maskC)
+    elif C == 9:
+        pred_mask9 = logits_to_lane_maskC(
+            pred_logits_chw,
+            threshold=pred_threshold,
+            use_sigmoid=pred_use_sigmoid,
+        )
+        gt_mask9 = gt_maskC
+        pred_colored = apply_lane_colors_rgb_9class(base_img_small, pred_mask9)
+        gt_colored = apply_lane_colors_rgb_9class(base_img_small, gt_mask9)
     else:
         # Unknown channel count: skip visualization.
         return np.zeros((Hm * 2, Wm * 2, 3), dtype=np.uint8)
@@ -339,6 +404,8 @@ def validate_lanes(
                     class_names = ["egoleft", "egoright", "other"]
                 elif C == 8:
                     class_names = LANE_CLASS_NAMES_8
+                elif C == 9:
+                    class_names = LANE_CLASS_NAMES_9
                 else:
                     class_names = [f"class_{i}" for i in range(C)]
 

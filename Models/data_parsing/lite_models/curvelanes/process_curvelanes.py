@@ -13,7 +13,7 @@ from PIL import Image, ImageDraw
 # ============================= Format functions ============================= #
 
 # Lane taxonomy (matches LabelMe / convert_labelme_to_curvelanes .lines.json).
-LANE_CLASSES = [
+LANE_CLASSES_8 = [
     "continuous_white_line",
     "continuous_yellow_line",
     "dashed_white_line",
@@ -23,8 +23,21 @@ LANE_CLASSES = [
     "stop_line",
     "invisible_line",
 ]
+LANE_CLASSES_9 = [
+    "continuous_white_line",
+    "continuous_yellow_line",
+    "dashed_white_line",
+    "double_white_lines",
+    "double_yellow_lines",
+    "curb_line",
+    "stop_line",
+    "invisible_line",
+    "Occluded_curb_lines",
+]
+# Dataset preprocessing uses the 9-class taxonomy by default.
+LANE_CLASSES = list(LANE_CLASSES_9)
 LANE_CLASS_TO_ID = {name: i for i, name in enumerate(LANE_CLASSES)}
-# RGB colors for semantic id 1..8 (background 0 = black)
+# RGB colors for semantic id 1..N (background 0 = black), aligned with LANE_CLASSES.
 LANE_CLASS_SEMANTIC_RGB = [
     (240, 240, 240),
     (0, 255, 255),
@@ -34,6 +47,7 @@ LANE_CLASS_SEMANTIC_RGB = [
     (0, 140, 255),
     (0, 0, 255),
     (128, 128, 128),
+    (255, 0, 255),
 ]
 
 # Default interpolation density when lines have few points (used by parseAnnotations).
@@ -322,10 +336,10 @@ def _resolve_line_label(i, payload):
 
 
 def semantic_id_map_to_rgb(id_map: np.ndarray) -> np.ndarray:
-    """H,W uint8 with values 0..8 -> H,W,3 RGB for visualization."""
+    """H,W uint8 with values 0..N -> H,W,3 RGB for visualization."""
     h, w = id_map.shape
     rgb = np.zeros((h, w, 3), dtype=np.uint8)
-    for cid in range(1, 9):
+    for cid in range(1, len(LANE_CLASS_SEMANTIC_RGB) + 1):
         m = id_map == cid
         rgb[m] = LANE_CLASS_SEMANTIC_RGB[cid - 1]
     return rgb
@@ -333,7 +347,7 @@ def semantic_id_map_to_rgb(id_map: np.ndarray) -> np.ndarray:
 
 def build_semantic_lane_mask(lines, labels, width, height):
     """
-    H,W uint8: 0 = background, 1..8 = lane class index + 1 (order matches LANE_CLASSES).
+    H,W uint8: 0 = background, 1..N = lane class index + 1 (order matches LANE_CLASSES).
     Later-drawn lanes overwrite earlier pixels on overlap.
     """
     if len(lines) != len(labels):
@@ -341,12 +355,12 @@ def build_semantic_lane_mask(lines, labels, width, height):
     out = np.zeros((height, width), dtype=np.uint8)
     order = sorted(
         range(len(lines)),
-        key=lambda i: (LANE_CLASS_TO_ID.get(labels[i], 7), i),
+        key=lambda i: (LANE_CLASS_TO_ID.get(labels[i], LANE_CLASS_TO_ID["invisible_line"]), i),
     )
     for i in order:
         line = lines[i]
         lab = labels[i]
-        cid = LANE_CLASS_TO_ID.get(lab, 7) + 1
+        cid = LANE_CLASS_TO_ID.get(lab, LANE_CLASS_TO_ID["invisible_line"]) + 1
         binm = calcLaneSegMask([line], width, height, normalized=False)
         out = np.where(binm > 0, np.uint8(cid), out)
     return out
@@ -377,8 +391,8 @@ def annotateGT(
     
     # Handle image resizing
     if (resize):
-        new_img_height = int(new_img_height * resize)
-        new_img_width = int(new_img_width * resize)
+        new_img_height = round(new_img_height * resize)
+        new_img_width = round(new_img_width * resize)
         raw_img = raw_img.resize((
             new_img_width, 
             new_img_height
@@ -400,8 +414,8 @@ def annotateGT(
         new_img_width -= (CROP_LEFT + CROP_RIGHT)
 
 
-    assert new_img_width in (1024, 1440, 1920), f"Unexpected width: {new_img_width}"
-    assert new_img_height in (640, 810, 1080), f"Unexpected height: {new_img_height}"
+    assert new_img_width in (1024, 1440, 1920, 2560), f"Unexpected width: {new_img_width}"
+    assert new_img_height in (640, 810, 1080, 1440), f"Unexpected height: {new_img_height}"
 
 
 
@@ -439,7 +453,7 @@ def annotateGT(
     #     drivable_renormed = anno_entry["drivable_path"]
     # draw.line(drivable_renormed, fill = lane_colors["drive_path_yellow"], width = lane_w)
 
-    # Fetch seg mask: HxW class ids (0..8) or legacy HxWx3
+    # Fetch seg mask: HxW class ids (0..N) or legacy HxWx3
     mask_array = np.array(anno_entry["mask"], dtype=np.uint8)
     if mask_array.ndim == 2:
         mask_rgb = semantic_id_map_to_rgb(mask_array)
@@ -481,7 +495,7 @@ def parseAnnotations(
     Returns:
         ``lanes_by_class``: dict mapping each of ``LANE_CLASSES`` to a list of
         normalized polylines (may be empty).
-        ``mask``: uint8 array (H, W) with values 0..8 (background + 8 classes).
+        ``mask``: uint8 array (H, W) with values 0..N (background + N classes).
     """
     with open(anno_path, "r") as f:
         payload = json.load(f)
@@ -515,8 +529,8 @@ def parseAnnotations(
     new_img_width = init_img_width
 
     if resize:
-        new_img_height = int(new_img_height * resize)
-        new_img_width = int(new_img_width * resize)
+        new_img_height = round(new_img_height * resize)
+        new_img_width = round(new_img_width * resize)
         lines = [
             [(x * resize, y * resize) for (x, y) in line]
             for line in lines
@@ -575,6 +589,28 @@ def parseAnnotations(
     return anno_data
 
 
+def parse_annotated_lane_classes(anno_path: str) -> list:
+    """Extract unique lane class names present in one annotation file."""
+    with open(anno_path, "r") as f:
+        payload = json.load(f)
+
+    read_data = payload.get("Lines", [])
+    if len(read_data) < 1:
+        return []
+
+    present_class_names = []
+    seen = set()
+    for i, _ in enumerate(read_data):
+        lab = _resolve_line_label(i, payload)
+        if lab not in LANE_CLASS_TO_ID:
+            lab = "invisible_line"
+        if lab not in seen:
+            seen.add(lab)
+            present_class_names.append(lab)
+
+    return present_class_names
+
+
 if __name__ == "__main__":
 
     # ============================== Dataset structure ============================== #
@@ -584,54 +620,63 @@ if __name__ == "__main__":
     IMG_DIR = "images"
     LABEL_DIR = "labels"
 
-    # I got this result from `./EDA_imgsizes.ipynb`
-    SIZE_DICT = {
-        "beeg" : (2560, 1440),
-        "half_beeg" : (1280, 720),
-        "weird" : (1570, 660),
-        "normal" : (1920, 1080),
-    }
-
-    # ========================= Target resolution =========================
-    TARGET_W = 1024
-    TARGET_H = 640
-    #chosen to have a multiple of 32, so that we dont have to do resize or cropping for models using various output stride (like 16 or 32 (see Unet family))
-
-    # ========================= Cropping presets =========================
-
-    # After resize(0.5): 2560x1440 -> 1280x720
-    # Also applies to native 1280x720 images
-    # 1280x720 -> 1024x640
-    #   width : remove 256  -> 128 left / 128 right
-    #   height: remove 80   -> 56 top / 24 bottom  (top-biased)
-    CROP_BEEG = {
-        "TOP": 56,
-        "RIGHT": 128,
-        "BOTTOM": 24,
-        "LEFT": 128,
-    }
-
-    # Native 1570x660 -> 1024x640
-    #   width : remove 546 -> 273 left / 273 right
-    #   height: remove 20  -> 10 top / 10 bottom
-    CROP_WEIRD = {
-        "TOP": 10,
-        "RIGHT": 273,
-        "BOTTOM": 10,
-        "LEFT": 273,
-    }
-
-    # After resize(0.75): 1920x1080 -> 1440x810
-    # 1440x810 -> 1024x640
-    #   width : remove 416 -> 208 left / 208 right
-    #   height: remove 170  -> 85 top / 85 bottom
-    CROP_NORMAL = {
-        "TOP": 0,
-        "RIGHT": 0,
-        "BOTTOM": 0,
-        "LEFT": 0,
-    }
-
+    # For this metadata-only single run, the resize/crop presets below are unnecessary.
+    # # I got this result from `./EDA_imgsizes.ipynb`
+    # SIZE_DICT = {
+    #     "beeg" : (2560, 1440),
+    #     "half_beeg" : (1280, 720),
+    #     "weird" : (1570, 660),
+    #     "normal" : (1920, 1080),
+    #     "gopro" : (2704, 2028),
+    # }
+    #
+    # # ========================= Target resolution =========================
+    # TARGET_W = 1024
+    # TARGET_H = 640
+    # #chosen to have a multiple of 32, so that we dont have to do resize or cropping for models using various output stride (like 16 or 32 (see Unet family))
+    #
+    # # ========================= Cropping presets =========================
+    #
+    # # After resize(0.5): 2560x1440 -> 1280x720
+    # # Also applies to native 1280x720 images
+    # # 1280x720 -> 1024x640
+    # #   width : remove 256  -> 128 left / 128 right
+    # #   height: remove 80   -> 56 top / 24 bottom  (top-biased)
+    # CROP_BEEG = {
+    #     "TOP": 56,
+    #     "RIGHT": 128,
+    #     "BOTTOM": 24,
+    #     "LEFT": 128,
+    # }
+    #
+    # # Native 1570x660 -> 1024x640
+    # #   width : remove 546 -> 273 left / 273 right
+    # #   height: remove 20  -> 10 top / 10 bottom
+    # CROP_WEIRD = {
+    #     "TOP": 10,
+    #     "RIGHT": 273,
+    #     "BOTTOM": 10,
+    #     "LEFT": 273,
+    # }
+    #
+    # # After resize(0.75): 1920x1080 -> 1440x810
+    # # 1440x810 -> 1024x640
+    # #   width : remove 416 -> 208 left / 208 right
+    # #   height: remove 170  -> 85 top / 85 bottom
+    # CROP_NORMAL = {
+    #     "TOP": 0,
+    #     "RIGHT": 0,
+    #     "BOTTOM": 0,
+    #     "LEFT": 0,
+    # }
+    #
+    # # 2704x2028 -> resize (0.71) to 1920x1440 -> crop to 1920x1080
+    # CROP_GOPRO = {
+    #     "TOP": 240,
+    #     "RIGHT": 0,
+    #     "BOTTOM": 120,
+    #     "LEFT": 0,
+    # }
 
     # ============================== Parsing args ============================== #
 
@@ -690,28 +735,17 @@ if __name__ == "__main__":
     # Generate output structure
     """
     --output_dir
-        |----image
-        |----mask
-        |----visualization
-        |----drivable_path.json
+        |----annotated_lane_classes.json
     """
-    list_subdirs = [
-        "image", 
-        "mask",
-        "visualization"
-    ]
-    if (os.path.exists(output_dir)):
-        warnings.warn(f"Output directory {output_dir} already exists. Purged")
-        shutil.rmtree(output_dir)
-    for subdir in list_subdirs:
-        subdir_path = os.path.join(output_dir, subdir)
-        if (not os.path.exists(subdir_path)):
-            os.makedirs(subdir_path, exist_ok = True)
+    os.makedirs(output_dir, exist_ok=True)
 
     # ============================== Parsing annotations ============================== #
 
     # Parse data by batch
-    data_master = {}
+    # NOTE: metadata-only run to save time:
+    # - skips image/mask/visualization generation
+    # - skips drivable_path.json generation
+    annotated_lane_classes = {}
     img_id_counter = -1
 
     for split in LIST_SPLITS:
@@ -728,63 +762,16 @@ if __name__ == "__main__":
                 img_path = os.path.join(dataset_dir, ROOT_DIR, split, list_raw_files[i]).strip()
                 img_id_counter += 1
 
-                # Preload image file for multiple uses later
-                raw_img = Image.open(img_path).convert("RGB")
-                img_width, img_height = raw_img.size
-
-                init_img_size = raw_img.size
-
-                resize = None
-                crop = None
-
-                if (init_img_size == SIZE_DICT["beeg"]):
-                    resize = 0.5
-                    crop = CROP_BEEG
-                elif (init_img_size == SIZE_DICT["half_beeg"]):
-                    resize = None
-                    crop = CROP_BEEG
-                elif (init_img_size == SIZE_DICT["weird"]):
-                    resize = None
-                    crop = CROP_WEIRD
-                elif (init_img_size == SIZE_DICT["normal"]):
-                    resize = None
-                    crop = None
-
                 anno_path = img_path.replace(".jpg", ".lines.json").replace(IMG_DIR, LABEL_DIR)
-
-                this_data = parseAnnotations(
-                    anno_path = anno_path,
-                    init_img_width = img_width,
-                    init_img_height = img_height,
-                    resize = resize,
-                    crop = crop
-                )
-                if (this_data is not None):
-
-                    annotateGT(
-                        raw_img = raw_img,
-                        anno_entry = this_data,
-                        raw_dir = os.path.join(output_dir, "image"),
-                        mask_dir = os.path.join(output_dir, "mask"),
-                        visualization_dir = os.path.join(output_dir, "visualization"),
-                        init_img_height = img_height,
-                        init_img_width = img_width,
-                        resize = resize,
-                        crop = crop
-                    )
-
-                    # Save as 6-digit incremental index
+                class_names = parse_annotated_lane_classes(anno_path)
+                if len(class_names) > 0:
                     img_index = str(str(img_id_counter).zfill(6))
-                    data_master[img_index] = {}
-                    for c in LANE_CLASSES:
-                        data_master[img_index][c] = [
-                            round_line_floats(line) for line in this_data["lanes_by_class"][c]
-                        ]
+                    image_name = f"{img_index}.jpg"
+                    annotated_lane_classes[image_name] = class_names
 
-                    # Early stopping, it defined
-                    if (early_stopping and img_id_counter >= early_stopping - 1):
-                        break
+                # Early stopping, it defined
+                if (early_stopping and img_id_counter >= early_stopping - 1):
+                    break
 
-    # Save master data
-    with open(os.path.join(output_dir, "drivable_path.json"), "w") as f:
-        json.dump(data_master, f, indent = 4)
+    with open(os.path.join(output_dir, "annotated_lane_classes.json"), "w") as f:
+        json.dump(annotated_lane_classes, f, indent=4)

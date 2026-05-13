@@ -50,6 +50,8 @@ import torch
 
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+NETWORK_INPUT_WIDTH = 800
+NETWORK_INPUT_HEIGHT = 416
 
 LANE_COLORS_RGB_3CLASS = {
     "egoleft": (0, 255, 255),
@@ -189,6 +191,80 @@ def fit_lanes_per_class(
         # Convert to JSON-serializable lists of [x,y]
         out[name] = [p.reshape(-1, 2).tolist() for p in polys]
     return out
+
+
+def scale_lane_lines(
+    lane_lines: dict,
+    *,
+    src_width: int,
+    src_height: int,
+    dst_width: int,
+    dst_height: int,
+) -> dict:
+    """
+    Scale lane polylines from source resolution to destination resolution.
+    """
+    if src_width <= 0 or src_height <= 0 or dst_width <= 0 or dst_height <= 0:
+        raise RuntimeError("Invalid source/destination shape for lane line scaling.")
+
+    sx = float(dst_width) / float(src_width)
+    sy = float(dst_height) / float(src_height)
+
+    out: dict = {}
+    for cls_name, polylines in lane_lines.items():
+        scaled_polys = []
+        for poly in polylines:
+            pts = np.asarray(poly, dtype=np.float32)
+            if pts.ndim != 2 or pts.shape[1] != 2:
+                continue
+            pts[:, 0] = np.clip(np.round(pts[:, 0] * sx), 0, dst_width - 1)
+            pts[:, 1] = np.clip(np.round(pts[:, 1] * sy), 0, dst_height - 1)
+            scaled_polys.append(pts.astype(np.int32).tolist())
+        if scaled_polys:
+            out[cls_name] = scaled_polys
+    return out
+
+
+def draw_lane_lines_from_dict(
+    canvas_rgb: np.ndarray,
+    lane_lines: dict,
+    *,
+    thickness: int = 3,
+) -> np.ndarray:
+    """
+    Draw lane polylines provided as dict[class_name] -> list[[x, y], ...].
+    """
+    out = canvas_rgb.copy()
+
+    color_map = {name: LANE_CLASS_COLORS_RGB_8[i] for i, name in enumerate(LANE_CLASS_NAMES_8)}
+    color_map.update({
+        "egoleft": LANE_COLORS_RGB_3CLASS["egoleft"],
+        "egoright": LANE_COLORS_RGB_3CLASS["egoright"],
+        "other": LANE_COLORS_RGB_3CLASS["other"],
+    })
+
+    for cls_name, polylines in lane_lines.items():
+        color = color_map.get(cls_name, (255, 255, 255))
+        cv_polys: List[np.ndarray] = []
+        for poly in polylines:
+            pts = np.asarray(poly, dtype=np.int32)
+            if pts.ndim != 2 or pts.shape[0] < 2 or pts.shape[1] != 2:
+                continue
+            cv_polys.append(pts.reshape(-1, 1, 2))
+        if cv_polys:
+            cv2.polylines(out, cv_polys, isClosed=False, color=color, thickness=int(thickness))
+    return out
+
+
+def resize_mask_hwc(mask_hwc: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
+    """
+    Resize a boolean HxWxC mask with nearest interpolation per channel.
+    """
+    channels = []
+    for c in range(mask_hwc.shape[2]):
+        ch = cv2.resize(mask_hwc[..., c].astype(np.uint8), (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+        channels.append(ch.astype(bool))
+    return np.stack(channels, axis=2)
 
 
 def draw_lane_polylines(
@@ -528,6 +604,9 @@ def run_inference_video(
     lane_poly_degree: int,
     render: str,
     save_lane_lines_json: bool,
+    save_resolution: str,
+    save_height: int,
+    save_width: int,
 ) -> None:
     os.makedirs(output_dir, exist_ok=True)
 
@@ -570,19 +649,65 @@ def run_inference_video(
             )
             mask_hwc = logits_to_mask(logits_chw, threshold)
             detected, pixel_counts = detect_classes_in_mask(mask_hwc, min_class_pixels)
-            lane_lines = (
-                fit_lanes_per_class(mask_hwc, lane_min_area, lane_poly_degree) if save_lane_lines_json else {}
-            )
+            need_lane_lines = save_lane_lines_json or render in ("lines", "both")
+            lane_lines_net = fit_lanes_per_class(mask_hwc, lane_min_area, lane_poly_degree) if need_lane_lines else {}
 
             record = {
                 "frame_index": frame_count,
                 "detected_lane_classes": detected,
                 "pixel_counts": pixel_counts,
-                "lane_lines": lane_lines,
+                "lane_lines": lane_lines_net,
             }
+
+            if save_resolution == "source":
+                target_w, target_h = frame_bgr.shape[1], frame_bgr.shape[0]
+            elif save_resolution == "network":
+                target_w, target_h = width, height
+            else:  # custom
+                target_w, target_h = save_width, save_height
+
+            lane_lines_out = lane_lines_net
+            if lane_lines_net and (target_w != width or target_h != height):
+                lane_lines_out = scale_lane_lines(
+                    lane_lines_net,
+                    src_width=width,
+                    src_height=height,
+                    dst_width=target_w,
+                    dst_height=target_h,
+                )
+
+            if save_lane_lines_json:
+                record["lane_lines_network"] = lane_lines_net
+                record["lane_lines_output"] = lane_lines_out
+            record["network_resolution"] = {"width": width, "height": height}
+            record["output_resolution"] = {"width": target_w, "height": target_h}
             jsonl_file.write(json.dumps(record) + "\n")
 
-            frame_out = cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR)
+            base_img_net = denorm_image_chw_to_uint8(input_arr[0])
+            if target_w != width or target_h != height:
+                base_img_out = cv2.resize(base_img_net, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+            else:
+                base_img_out = base_img_net
+
+            if render == "mask":
+                if target_w != width or target_h != height:
+                    mask_out = resize_mask_hwc(mask_hwc, target_h, target_w)
+                    colored_out = apply_lane_colors_3class(base_img_out, mask_out) if mask_out.shape[2] == 3 else apply_lane_colors_8class(base_img_out, mask_out)
+                    overlay_out = cv2.addWeighted(colored_out, 0.5, base_img_out, 0.5, 0)
+                else:
+                    overlay_out = overlay
+            elif render == "lines":
+                overlay_out = draw_lane_lines_from_dict(base_img_out, lane_lines_out, thickness=3)
+            else:  # both
+                if target_w != width or target_h != height:
+                    mask_out = resize_mask_hwc(mask_hwc, target_h, target_w)
+                    mask_colored = apply_lane_colors_3class(base_img_out, mask_out) if mask_out.shape[2] == 3 else apply_lane_colors_8class(base_img_out, mask_out)
+                else:
+                    mask_colored = apply_lane_colors_3class(base_img_out, mask_hwc) if mask_hwc.shape[2] == 3 else apply_lane_colors_8class(base_img_out, mask_hwc)
+                overlay_out = draw_lane_lines_from_dict(mask_colored, lane_lines_out, thickness=3)
+                overlay_out = cv2.addWeighted(overlay_out, 0.5, base_img_out, 0.5, 0)
+
+            frame_out = cv2.cvtColor(overlay_out, cv2.COLOR_RGB2BGR)
 
             if writer is None:
                 h, w = frame_out.shape[:2]
@@ -591,6 +716,7 @@ def run_inference_video(
                 if not writer.isOpened():
                     cap.release()
                     raise RuntimeError(f"Could not open VideoWriter: {out_video_path}")
+                print(f"Saving output video at: {w}x{h} ({save_resolution})")
 
             writer.write(frame_out)
             frame_count += 1
@@ -652,12 +778,24 @@ def main() -> None:
         help="Directory where predictions will be saved",
     )
     parser.add_argument(
-        "--height", type=int, default=416,
-        help="Input height (must match ONNX export resolution)",
+        "--height", type=int, default=NETWORK_INPUT_HEIGHT,
+        help="Deprecated input height override. Inference is always forced to network size.",
     )
     parser.add_argument(
-        "--width", type=int, default=800,
-        help="Input width (must match ONNX export resolution)",
+        "--width", type=int, default=NETWORK_INPUT_WIDTH,
+        help="Deprecated input width override. Inference is always forced to network size.",
+    )
+    parser.add_argument(
+        "--save_resolution", choices=["network", "source", "custom"], default="source",
+        help="Video output resolution mode: network=800x416, source=original frame size, custom=--save_width/--save_height",
+    )
+    parser.add_argument(
+        "--save_height", type=int, default=NETWORK_INPUT_HEIGHT,
+        help="Output video height for --save_resolution custom",
+    )
+    parser.add_argument(
+        "--save_width", type=int, default=NETWORK_INPUT_WIDTH,
+        help="Output video width for --save_resolution custom",
     )
     parser.add_argument(
         "--threshold", type=float, default=0.0,
@@ -701,6 +839,16 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    if args.save_resolution == "custom" and (args.save_height <= 0 or args.save_width <= 0):
+        raise RuntimeError("--save_width and --save_height must be > 0 for --save_resolution custom.")
+
+    if args.height != NETWORK_INPUT_HEIGHT or args.width != NETWORK_INPUT_WIDTH:
+        print(
+            f"[Info] Ignoring requested --height/--width ({args.width}x{args.height}). "
+            f"Using fixed network input {NETWORK_INPUT_WIDTH}x{NETWORK_INPUT_HEIGHT}."
+        )
+    args.height = NETWORK_INPUT_HEIGHT
+    args.width = NETWORK_INPUT_WIDTH
 
     if not args.benchmark_only:
         if args.input_dir is not None and args.input_video is not None:
@@ -753,6 +901,7 @@ def main() -> None:
             session_backend, session_obj, args.input_video, args.output_dir,
             args.height, args.width, args.threshold, args.min_class_pixels,
             args.lane_min_area, args.lane_poly_degree, args.render, args.save_lane_lines_json,
+            args.save_resolution, args.save_height, args.save_width,
         )
     else:
         image_paths = list_images(args.input_dir)

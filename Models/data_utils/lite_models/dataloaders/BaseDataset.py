@@ -17,6 +17,17 @@ LANE_CLASS_RGB_PALETTE_8 = [
     (0, 0, 255),
     (128, 128, 128),
 ]
+LANE_CLASS_RGB_PALETTE_9 = [
+    (240, 240, 240),
+    (0, 255, 255),
+    (200, 200, 200),
+    (220, 220, 220),
+    (0, 220, 255),
+    (0, 140, 255),
+    (0, 0, 255),
+    (128, 128, 128),
+    (255, 0, 255),
+]
 
 LANE_CLASS_RGB_PALETTE_3 = [
     (0, 255, 255),
@@ -41,10 +52,12 @@ def rgb_semantic_mask_to_C_channels(rgb: np.ndarray, num_channels: int) -> np.nd
         palette = LANE_CLASS_RGB_PALETTE_3
     elif num_channels == 8:
         palette = LANE_CLASS_RGB_PALETTE_8
+    elif num_channels == 9:
+        palette = LANE_CLASS_RGB_PALETTE_9
     elif num_channels == 1:
         palette = [(255, 0, 0)]
     else:
-        raise ValueError(f"[BaseDataset] Expected 3 or 8 channels, got {num_channels}")
+        raise ValueError(f"[BaseDataset] Expected 3, 8 or 9 channels, got {num_channels}")
 
     for i, color in enumerate(palette):
         col = np.array(color, dtype=np.uint8)

@@ -2,7 +2,8 @@ import os
 import numpy as np
 import torch
 from tqdm import tqdm
-from torch.utils.data import ConcatDataset
+from torch.utils.data import ConcatDataset, WeightedRandomSampler
+from typing import List
 
 from abc import ABC, abstractmethod
 
@@ -187,7 +188,13 @@ class LiteTrainerBase(ABC):
 
         if len(train_datasets) > 0 :
             self.train_dataset = ConcatDataset(train_datasets)
-            self.train_loader = build_dataloader(self.train_dataset, self.dl_cfg, mode="train")
+            train_sampler = self._build_train_sampler(train_datasets)
+            self.train_loader = build_dataloader(
+                self.train_dataset,
+                self.dl_cfg,
+                mode="train",
+                sampler=train_sampler,
+            )
         else:
             self.train_loader = list()  #empty list
             Warning("training list empty, not performing dataset concatenation")
@@ -205,6 +212,68 @@ class LiteTrainerBase(ABC):
             self.val_loaders[ds_name] = build_dataloader(val_dset, self.dl_cfg, mode="val")
 
         self.steps_per_epoch = len(self.train_loader)
+
+    def _build_train_sampler(self, train_datasets: List[torch.utils.data.Dataset]):
+        """Create an optional train sampler from dataloader config."""
+        sampler_cfg = self.dl_cfg.get("weighted_sampler", {})
+        if not sampler_cfg.get("enabled", False):
+            return None
+        if self.task != "LANE_DETECTION":
+            print("[WeightedSampler] Enabled in config but task is not LANE_DETECTION; skipping sampler.")
+            return None
+
+        class_weights_cfg = sampler_cfg.get("class_weights", {})
+        if not class_weights_cfg:
+            raise ValueError("[WeightedSampler] 'class_weights' must be a non-empty mapping.")
+
+        min_weight = float(sampler_cfg.get("min_weight", 1.0))
+        replacement = bool(sampler_cfg.get("replacement", True))
+        if min_weight <= 0:
+            raise ValueError(f"[WeightedSampler] min_weight must be > 0, got {min_weight}")
+
+        concatenated_weights: List[float] = []
+        for dataset in train_datasets:
+            dataset_weights = dataset.build_sample_weights(
+                class_weights=class_weights_cfg,
+                min_weight=min_weight,
+            )
+            concatenated_weights.extend(float(w) for w in dataset_weights)
+
+        if len(concatenated_weights) != len(self.train_dataset):
+            raise RuntimeError(
+                "[WeightedSampler] Weight vector length mismatch: "
+                f"{len(concatenated_weights)} vs dataset length {len(self.train_dataset)}."
+            )
+
+        weights_np = np.asarray(concatenated_weights, dtype=np.float64)
+        if np.any(weights_np <= 0):
+            raise ValueError("[WeightedSampler] All sample weights must be > 0.")
+
+        num_samples_cfg = sampler_cfg.get("num_samples_per_epoch", None)
+        num_samples = int(num_samples_cfg) if num_samples_cfg is not None else len(self.train_dataset)
+        if num_samples <= 0:
+            raise ValueError(f"[WeightedSampler] num_samples_per_epoch must be > 0, got {num_samples}")
+
+        configured_class_weights = ", ".join(
+            f"{name}={float(weight):.3f}" for name, weight in sorted(class_weights_cfg.items())
+        )
+        print(f"[WeightedSampler] Class weights: {configured_class_weights}")
+        print(
+            "[WeightedSampler] Sample weight stats | "
+            f"min={weights_np.min():.3f}, p50={np.percentile(weights_np, 50):.3f}, "
+            f"p90={np.percentile(weights_np, 90):.3f}, p99={np.percentile(weights_np, 99):.3f}, "
+            f"max={weights_np.max():.3f}, mean={weights_np.mean():.3f}"
+        )
+        print(
+            f"[WeightedSampler] replacement={replacement}, "
+            f"num_samples_per_epoch={num_samples}, dataset_size={len(self.train_dataset)}"
+        )
+
+        return WeightedRandomSampler(
+            weights=torch.as_tensor(weights_np, dtype=torch.double),
+            num_samples=num_samples,
+            replacement=replacement,
+        )
 
 
     def _build_training_state(self):

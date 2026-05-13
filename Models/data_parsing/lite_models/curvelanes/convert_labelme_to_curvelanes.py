@@ -6,7 +6,7 @@ import glob
 import warnings
 import argparse
 import numpy as np
-from collections import Counter
+from collections import Counter, defaultdict
 
 try:
     warnings.simplefilter("ignore", np.exceptions.RankWarning)
@@ -23,7 +23,7 @@ ROW_ANCHOR_START = 400 # 64 row anchors
 ROW_ANCHOR_END = 1080
 ROW_ANCHOR_STEP = 10
 
-# Stable lane taxonomy for class assignment (requested).
+# Stable 8-class taxonomy kept for compatibility/debugging.
 LANE_CLASSES_8 = [
     "continuous_white_line",   # 0
     "continuous_yellow_line",  # 1
@@ -34,17 +34,31 @@ LANE_CLASSES_8 = [
     "stop_line",               # 6
     "invisible_line",          # 7
 ]
+
+# Stable lane taxonomy for class assignment (requested).
+LANE_CLASSES_9 = [
+    "continuous_white_line",   # 0
+    "continuous_yellow_line",  # 1
+    "dashed_white_line",       # 2
+    "double_white_lines",      # 3
+    "double_yellow_lines",     # 4
+    "curb_line",               # 5
+    "stop_line",               # 6
+    "invisible_line",          # 7
+    "Occluded_curb_lines",     # 8
+]
+
 LANE_CLASSES_3 = [
     "egoleft",
     "egoright",
     "other_lanes",
 ]
 
-ACTIVE_LANE_CLASSES = list(LANE_CLASSES_8)
+ACTIVE_LANE_CLASSES = list(LANE_CLASSES_9)
 ACTIVE_LANE_CLASS_TO_ID = {name: idx for idx, name in enumerate(ACTIVE_LANE_CLASSES)}
 
 # BGR debug colors (keys match exact JSON label strings in LANE_CLASSES).
-LANE_CLASS_COLOR_BGR = {
+LANE_8_CLASS_COLOR_BGR = {
     "continuous_white_line": (240, 240, 240),
     "continuous_yellow_line": (0, 255, 255),
     "dashed_white_line": (200, 200, 200),
@@ -55,11 +69,23 @@ LANE_CLASS_COLOR_BGR = {
     "invisible_line": (128, 128, 128),
 }
 
+LANE_9_CLASS_COLOR_BGR = {
+    "continuous_white_line": (240, 240, 240),
+    "continuous_yellow_line": (0, 255, 255),
+    "dashed_white_line": (200, 200, 200),
+    "double_white_lines": (220, 220, 220),
+    "double_yellow_lines": (0, 220, 255),
+    "curb_line": (0, 140, 255),
+    "stop_line": (0, 0, 255),
+    "invisible_line": (128, 128, 128),
+    "Occluded_curb_lines": (255, 0, 255),
+}
+
 
 def bgr_color_for_lane_label(label):
     key = str(label).strip()
-    if key in LANE_CLASS_COLOR_BGR:
-        return LANE_CLASS_COLOR_BGR[key]
+    if key in LANE_9_CLASS_COLOR_BGR:
+        return LANE_9_CLASS_COLOR_BGR[key]
     h = abs(hash(key))
     return (h & 255, (h >> 8) & 255, (h >> 16) & 255)
 
@@ -74,7 +100,9 @@ def _debug_overlay_text(slot, class_label):
 
 
 def build_lane_taxonomy(class_mode: int):
-    if class_mode == 8:
+    if class_mode == 9:
+        classes = list(LANE_CLASSES_9)
+    elif class_mode == 8:
         classes = list(LANE_CLASSES_8)
     elif class_mode == 3:
         classes = list(LANE_CLASSES_3)
@@ -616,7 +644,7 @@ def shapes_to_curvelanes_lines(shapes, img_width: int):
         if len(line) >= 2:
             lines.append(line)
             line_labels.append(str(label))
-            if CLASS_MODE == 8:
+            if CLASS_MODE in (8, 9):
                 key = str(label).strip()
                 fallback = ACTIVE_LANE_CLASS_TO_ID.get("invisible_line", 0)
                 cls_id = int(ACTIVE_LANE_CLASS_TO_ID.get(key, fallback))
@@ -652,6 +680,18 @@ def split_sessions_by_ratio(sessions, train_ratio, valid_ratio, seed=42):
     return train_sessions, valid_sessions, test_sessions
 
 
+def discover_session_folders(input_dir):
+    """Recursively find session directories that contain both images/ and Annotations/."""
+    sessions = []
+    input_dir = os.path.abspath(input_dir)
+
+    for root, dirs, _files in os.walk(input_dir):
+        if {"images", "labels"}.issubset(set(dirs)):
+            sessions.append(os.path.relpath(root, input_dir))
+
+    return sorted(sessions)
+
+
 def ensure_split_dirs(output_dir, split_name):
     split_root = os.path.join(output_dir, split_name)
     os.makedirs(os.path.join(split_root, "images"), exist_ok=True)
@@ -663,10 +703,11 @@ def ensure_split_dirs(output_dir, split_name):
 def process_split_sessions(input_dir, output_dir, split_name, sessions, row_anchors):
     """
     Process a list of sessions and write split-specific files.
-    Returns split entries used to write list/cache files.
+    Returns split entries used to write list/cache files plus filtering stats.
     """
     split_root = ensure_split_dirs(output_dir, split_name)
     entries = []
+    stats = Counter()
 
     for session in sessions:
         session_path = os.path.join(input_dir, session)
@@ -681,12 +722,14 @@ def process_split_sessions(input_dir, output_dir, split_name, sessions, row_anch
         print(f"[{split_name}] Processing {session}: {len(json_files)} annotations")
 
         for jf in json_files:
+            stats["json_seen"] += 1
             basename = os.path.splitext(os.path.basename(jf))[0]
 
             img_path = os.path.join(images_dir, basename + ".jpg")
             if not os.path.exists(img_path):
                 img_path = os.path.join(images_dir, basename + ".png")
             if not os.path.exists(img_path):
+                stats["missing_image"] += 1
                 continue
 
             with open(jf) as f:
@@ -696,6 +739,7 @@ def process_split_sessions(input_dir, output_dir, split_name, sessions, row_anch
             img_w = data.get("imageWidth", IMG_WIDTH)
             shapes = data.get("shapes", [])
             if not shapes:
+                stats["empty_shapes"] += 1
                 continue
 
             raw_out_name = f"{session}_{basename}"
@@ -708,12 +752,14 @@ def process_split_sessions(input_dir, output_dir, split_name, sessions, row_anch
 
             # Filter out images that have less than 2 lanes
             if len(shapes) < 2:
+                stats["lt_2_raw_shapes"] += 1
                 continue
 
             bin_label, seg_mask, points, slot_raw_pts, num_valid, slot_labels = process_one_image(
                 shapes, img_h, img_w, row_anchors
             )
             if sum(bin_label) < 2:
+                stats["lt_2_valid_slots_after_assignment"] += 1
                 continue
             lines_payload = shapes_to_curvelanes_lines(shapes, img_width=img_w)
 
@@ -742,8 +788,216 @@ def process_split_sessions(input_dir, output_dir, split_name, sessions, row_anch
                 "points": points.tolist(),
                 "num_valid": num_valid,
             })
+            stats["written"] += 1
 
-    return entries
+    return entries, stats
+
+
+def collect_valid_samples_from_sessions(input_dir, sessions, row_anchors):
+    """
+    Collect all valid samples from sessions without writing split files.
+    Returns:
+      - records: per-sample processed payloads for later split assignment/writing
+      - stats: filtering stats equivalent to process_split_sessions pre-write stage
+    """
+    records = []
+    stats = Counter()
+
+    for session in sessions:
+        session_path = os.path.join(input_dir, session)
+        json_dir = os.path.join(session_path, "labels")
+        images_dir = os.path.join(session_path, "images")
+
+        if not os.path.isdir(json_dir) or not os.path.isdir(images_dir):
+            print(f"[collect] Skipping {session}: missing labels or images folder")
+            continue
+
+        json_files = sorted(glob.glob(os.path.join(json_dir, "*.json")))
+        print(f"[collect] Processing {session}: {len(json_files)} annotations")
+
+        for jf in json_files:
+            stats["json_seen"] += 1
+            basename = os.path.splitext(os.path.basename(jf))[0]
+
+            img_path = os.path.join(images_dir, basename + ".jpg")
+            if not os.path.exists(img_path):
+                img_path = os.path.join(images_dir, basename + ".png")
+            if not os.path.exists(img_path):
+                stats["missing_image"] += 1
+                continue
+
+            with open(jf) as f:
+                data = json.load(f)
+
+            img_h = data.get("imageHeight", IMG_HEIGHT)
+            img_w = data.get("imageWidth", IMG_WIDTH)
+            shapes = data.get("shapes", [])
+            if not shapes:
+                stats["empty_shapes"] += 1
+                continue
+
+            # # Filter out images that have less than 2 lanes
+            # if len(shapes) < 2:
+            #     stats["lt_2_raw_shapes"] += 1
+            #     continue
+
+            bin_label, seg_mask, points, slot_raw_pts, num_valid, slot_labels = process_one_image(
+                shapes, img_h, img_w, row_anchors
+            )
+            # if sum(bin_label) < 2:
+            #     stats["lt_2_valid_slots_after_assignment"] += 1
+            #     continue
+
+            lines_payload = shapes_to_curvelanes_lines(shapes, img_width=img_w)
+            class_ids = sorted(set(int(cid) for cid in lines_payload.get("LineClassIds", [])))
+
+            raw_out_name = f"{session}_{basename}"
+            out_name = re.sub(r"[^A-Za-z0-9._-]", "_", raw_out_name)
+            records.append({
+                "session": session,
+                "basename": basename,
+                "out_name": out_name,
+                "img_path": img_path,
+                "bin_label": bin_label,
+                "points": points,
+                "slot_raw_pts": slot_raw_pts,
+                "num_valid": num_valid,
+                "slot_labels": slot_labels,
+                "shapes": shapes,
+                "lines_payload": lines_payload,
+                "class_ids": class_ids,
+            })
+
+    return records, stats
+
+
+def split_records_stratified_by_class(records, train_ratio, valid_ratio, seed=42):
+    """
+    Stratified split by lane class presence (multi-label).
+    Uses a greedy assignment to balance per-class presence counts across splits.
+    """
+    if train_ratio <= 0 or valid_ratio < 0 or train_ratio + valid_ratio >= 1:
+        raise ValueError("Need train_ratio > 0, valid_ratio >= 0, and train_ratio + valid_ratio < 1.")
+
+    n_total = len(records)
+    if n_total == 0:
+        return [], [], []
+
+    n_train = int(n_total * train_ratio)
+    n_valid = int(n_total * valid_ratio)
+    n_test = n_total - n_train - n_valid
+    split_caps = {"train": n_train, "valid": n_valid, "test": n_test}
+    split_names = ["train", "valid", "test"]
+
+    per_class_total = Counter()
+    per_record_class_sets = []
+    for rec in records:
+        cls_set = set(rec.get("class_ids", []))
+        per_record_class_sets.append(cls_set)
+        for cid in cls_set:
+            per_class_total[cid] += 1
+
+    target_class_counts = {
+        "train": {cid: per_class_total[cid] * train_ratio for cid in per_class_total},
+        "valid": {cid: per_class_total[cid] * valid_ratio for cid in per_class_total},
+        "test": {cid: per_class_total[cid] * (1.0 - train_ratio - valid_ratio) for cid in per_class_total},
+    }
+
+    rng = np.random.default_rng(seed)
+    idxs = list(range(n_total))
+    rng.shuffle(idxs)
+
+    def rarity_score(idx):
+        cls_set = per_record_class_sets[idx]
+        if not cls_set:
+            return float("inf")
+        return min(per_class_total[cid] for cid in cls_set)
+
+    idxs.sort(key=lambda idx: (rarity_score(idx), -len(per_record_class_sets[idx])))
+
+    split_records = {"train": [], "valid": [], "test": []}
+    current_class_counts = {name: Counter() for name in split_names}
+    current_sizes = {name: 0 for name in split_names}
+
+    for idx in idxs:
+        cls_set = per_record_class_sets[idx]
+        best_split = None
+        best_score = None
+
+        for split_name in split_names:
+            if current_sizes[split_name] >= split_caps[split_name]:
+                continue
+
+            score = 0.0
+            for cid in cls_set:
+                cur = current_class_counts[split_name][cid]
+                tgt = target_class_counts[split_name].get(cid, 0.0)
+                score += abs((cur + 1) - tgt) - abs(cur - tgt)
+
+            after_size = current_sizes[split_name] + 1
+            score += 0.01 * abs(after_size - split_caps[split_name])
+
+            if best_score is None or score < best_score:
+                best_score = score
+                best_split = split_name
+
+        if best_split is None:
+            remaining = [s for s in split_names if current_sizes[s] < split_caps[s]]
+            best_split = remaining[0] if remaining else "test"
+
+        split_records[best_split].append(records[idx])
+        current_sizes[best_split] += 1
+        for cid in cls_set:
+            current_class_counts[best_split][cid] += 1
+
+    return split_records["train"], split_records["valid"], split_records["test"]
+
+
+def write_records_to_split(output_dir, split_name, records, row_anchors):
+    """Write pre-collected records into one split folder."""
+    split_root = ensure_split_dirs(output_dir, split_name)
+    entries = []
+    stats = Counter()
+
+    for rec in records:
+        out_name = rec["out_name"]
+        split_img_rel = f"{split_name}/images/{out_name}.jpg"
+        split_label_rel = f"{split_name}/labels/{out_name}.lines.json"
+        img_rel = f"images/{out_name}.jpg"
+        label_rel = f"labels/{out_name}.lines.json"
+
+        img = cv2.imread(rec["img_path"])
+        if img is None:
+            stats["missing_image"] += 1
+            continue
+
+        cv2.imwrite(os.path.join(output_dir, split_img_rel), img)
+        with open(os.path.join(output_dir, split_label_rel), "w") as f:
+            json.dump(rec["lines_payload"], f)
+
+        debug_img = draw_debug_image(
+            img,
+            rec["bin_label"],
+            rec["points"],
+            row_anchors,
+            rec["slot_raw_pts"],
+            slot_labels=rec["slot_labels"],
+            shapes=rec["shapes"],
+        )
+        cv2.imwrite(os.path.join(split_root, f"debug_vis/{out_name}.jpg"), debug_img)
+
+        entries.append({
+            "img_rel": img_rel,
+            "label_rel": label_rel,
+            "split_img_rel": split_img_rel,
+            "split_label_rel": split_label_rel,
+            "bin_label": rec["bin_label"],
+            "points": rec["points"].tolist(),
+            "num_valid": rec["num_valid"],
+        })
+        stats["written"] += 1
+
+    return entries, stats
 
 
 def write_split_files(output_dir, split_name, entries):
@@ -796,7 +1050,7 @@ def write_cache_file(output_dir, split_name, entries):
 def main():
     parser = argparse.ArgumentParser(description="Convert LabelMe annotations to UFLDv2 format")
     parser.add_argument("--input-dir", required=True,
-                        help="Root directory containing session folders (each with images/ and labels/)")
+                        help="Root directory containing session folders anywhere under it (each with images/ and Annotations/)")
     parser.add_argument("--output-dir", required=True,
                         help="Output directory for UFLDv2-formatted data")
     parser.add_argument("--num-lanes", type=int, default=6)
@@ -807,10 +1061,12 @@ def main():
                         help="Validation split ratio by session directories")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for directory-level split")
+    parser.add_argument("--split-mode", type=str, choices=["session", "stratified"], default="session",
+                        help="Split strategy: session=legacy whole-session split, stratified=class-balanced image-level split")
     parser.add_argument("--include-stop-lines", action="store_true", default=False,
                         help="Include stop_line annotations")
-    parser.add_argument("--class-mode", type=int, choices=[3, 8], default=8,
-                        help="Lane class mode: 8=original lane taxonomy, 3=egoleft/egoright/other_lanes")
+    parser.add_argument("--class-mode", type=int, choices=[3, 9], default=9,
+                        help="Lane class mode: 9=full lane taxonomy (default), 3=egoleft/egoright/other_lanes")
     args = parser.parse_args()
 
     global NUM_LANES, HALF_LANES, LANE_DRAW_WIDTH, SKIP_LABELS
@@ -827,46 +1083,70 @@ def main():
 
     row_anchors = np.array(list(range(ROW_ANCHOR_START, ROW_ANCHOR_END, ROW_ANCHOR_STEP)))
 
-    sessions = sorted([
-        d for d in os.listdir(args.input_dir)
-        if os.path.isdir(os.path.join(args.input_dir, d))
-           and os.path.isdir(os.path.join(args.input_dir, d, "images"))
-           and os.path.isdir(os.path.join(args.input_dir, d, "labels"))
-    ])
+    sessions = discover_session_folders(args.input_dir)
 
-    train_sessions, valid_sessions, test_sessions = split_sessions_by_ratio(
-        sessions,
-        train_ratio=args.train_ratio,
-        valid_ratio=args.valid_ratio,
-        seed=args.seed
-    )
+    if args.split_mode == "session":
+        train_sessions, valid_sessions, test_sessions = split_sessions_by_ratio(
+            sessions,
+            train_ratio=args.train_ratio,
+            valid_ratio=args.valid_ratio,
+            seed=args.seed
+        )
 
-    print("\nSession split (directory-level):")
-    print(f"  Train sessions: {len(train_sessions)}")
-    print(f"  Valid sessions: {len(valid_sessions)}")
-    print(f"  Test sessions : {len(test_sessions)}")
+        print("\nSession split (directory-level):")
+        print(f"  Train sessions: {len(train_sessions)}")
+        print(f"  Valid sessions: {len(valid_sessions)}")
+        print(f"  Test sessions : {len(test_sessions)}")
 
-    train_entries = process_split_sessions(
-        input_dir=args.input_dir,
-        output_dir=args.output_dir,
-        split_name="train",
-        sessions=train_sessions,
-        row_anchors=row_anchors
-    )
-    valid_entries = process_split_sessions(
-        input_dir=args.input_dir,
-        output_dir=args.output_dir,
-        split_name="valid",
-        sessions=valid_sessions,
-        row_anchors=row_anchors
-    )
-    test_entries = process_split_sessions(
-        input_dir=args.input_dir,
-        output_dir=args.output_dir,
-        split_name="test",
-        sessions=test_sessions,
-        row_anchors=row_anchors
-    )
+        train_entries, train_stats = process_split_sessions(
+            input_dir=args.input_dir,
+            output_dir=args.output_dir,
+            split_name="train",
+            sessions=train_sessions,
+            row_anchors=row_anchors
+        )
+        valid_entries, valid_stats = process_split_sessions(
+            input_dir=args.input_dir,
+            output_dir=args.output_dir,
+            split_name="valid",
+            sessions=valid_sessions,
+            row_anchors=row_anchors
+        )
+        test_entries, test_stats = process_split_sessions(
+            input_dir=args.input_dir,
+            output_dir=args.output_dir,
+            split_name="test",
+            sessions=test_sessions,
+            row_anchors=row_anchors
+        )
+        all_stats = train_stats + valid_stats + test_stats
+    else:
+        print("\nStratified split (image-level, class-balanced by presence):")
+        all_records, base_stats = collect_valid_samples_from_sessions(
+            input_dir=args.input_dir,
+            sessions=sessions,
+            row_anchors=row_anchors,
+        )
+        train_records, valid_records, test_records = split_records_stratified_by_class(
+            all_records,
+            train_ratio=args.train_ratio,
+            valid_ratio=args.valid_ratio,
+            seed=args.seed,
+        )
+        print(f"  Train records: {len(train_records)}")
+        print(f"  Valid records: {len(valid_records)}")
+        print(f"  Test records : {len(test_records)}")
+
+        train_entries, train_write_stats = write_records_to_split(
+            args.output_dir, "train", train_records, row_anchors
+        )
+        valid_entries, valid_write_stats = write_records_to_split(
+            args.output_dir, "valid", valid_records, row_anchors
+        )
+        test_entries, test_write_stats = write_records_to_split(
+            args.output_dir, "test", test_records, row_anchors
+        )
+        all_stats = base_stats + train_write_stats + valid_write_stats + test_write_stats
 
     write_split_files(args.output_dir, "train", train_entries)
     write_split_files(args.output_dir, "valid", valid_entries)
@@ -888,6 +1168,13 @@ def main():
     print(f"  Lane class mode: {CLASS_MODE} ({len(ACTIVE_LANE_CLASSES)} classes)")
     print(f"  Row anchors: {len(row_anchors)} (y={ROW_ANCHOR_START} to y={ROW_ANCHOR_END}, step={ROW_ANCHOR_STEP})")
     print(f"  Stop lines: {'included' if not SKIP_LABELS else 'skipped'}")
+    print(f"\n  Original annotations seen: {all_stats.get('json_seen', 0)}")
+    print(f"  Samples written         : {all_stats.get('written', 0)}")
+    print(f"  Samples filtered out    : {all_stats.get('json_seen', 0) - all_stats.get('written', 0)}")
+    print(f"    Missing image file              : {all_stats.get('missing_image', 0)}")
+    print(f"    Empty shapes list               : {all_stats.get('empty_shapes', 0)}")
+    print(f"    Fewer than 2 raw shapes         : {all_stats.get('lt_2_raw_shapes', 0)}")
+    print(f"    Fewer than 2 valid slots after assignment: {all_stats.get('lt_2_valid_slots_after_assignment', 0)}")
     print(f"\n  Lane count distribution (after slot assignment):")
     for k in sorted(lane_counts.keys()):
         print(f"    {k} lanes: {lane_counts[k]} images")

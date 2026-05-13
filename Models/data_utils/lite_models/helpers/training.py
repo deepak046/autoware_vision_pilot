@@ -2,9 +2,11 @@
 import os
 import random
 import yaml
+import json
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+from typing import Optional
 
 from Models.data_utils.lite_models.dataloaders.ACDCDataset import ACDCDataset
 from Models.data_utils.lite_models.dataloaders.MapillaryDataset import MapillaryDataset
@@ -37,7 +39,7 @@ def save_checkpoint(state: dict, path: str):
 
 
 
-def build_dataloader(dataset, cfg_dl, mode: str):
+def build_dataloader(dataset, cfg_dl, mode: str, sampler: Optional[torch.utils.data.Sampler] = None):
     # print("[Dataloader] config:", cfg_dl)
     if cfg_dl is None:
         #used for evaluation
@@ -52,10 +54,17 @@ def build_dataloader(dataset, cfg_dl, mode: str):
     else:
         val_batch_size = 4
 
+    shuffle_enabled = cfg_dl.get("shuffle_train", True) if mode == "train" else cfg_dl.get("shuffle_val", False)
+    if sampler is not None:
+        if mode != "train":
+            raise ValueError("Sampler is only supported for train dataloaders.")
+        shuffle_enabled = False
+
     return DataLoader(
         dataset,
         batch_size=cfg_dl.get("batch_size", 8) if mode == "train" else val_batch_size,
-        shuffle=cfg_dl.get("shuffle_train", True) if mode == "train" else cfg_dl.get("shuffle_val", False),
+        shuffle=shuffle_enabled,
+        sampler=sampler,
         num_workers=cfg_dl.get("num_workers", 4),
         pin_memory=cfg_dl.get("pin_memory", True),
         drop_last=cfg_dl.get("drop_last", mode == "train"),
@@ -97,7 +106,20 @@ def build_single_dataset(name: str, dataset_root: str, aug_cfg: dict, mode: str,
         return CityscapesDataset(dataset_root, aug_cfg=aug_cfg, mode=mode, data_type=data_type, pseudo_labeling=pseudo_labeling)
     
     elif name == "curvelanes":
-        return CurveLanesDataset(dataset_root, aug_cfg=aug_cfg, mode=mode, data_type=data_type)
+        annotated_lane_classes_path = os.path.join(dataset_root, "annotated_lane_classes.json")
+        annotated_lane_classes = None
+        if os.path.isfile(annotated_lane_classes_path):
+            with open(annotated_lane_classes_path, "r") as f:
+                payload = json.load(f)
+            annotated_lane_classes = payload
+
+        return CurveLanesDataset(
+            dataset_root,
+            aug_cfg=aug_cfg,
+            mode=mode,
+            data_type=data_type,
+            annotated_lane_classes=annotated_lane_classes,
+        )
 
     elif name == "tusimple":
         return TUSimpleDataset(dataset_root, aug_cfg=aug_cfg, mode=mode, data_type=data_type)

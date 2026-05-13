@@ -1,11 +1,11 @@
 experiment:
-  name: "complete_unet_8class_fcn_skip_cbam_batch8_sigmoid_0.5_cross"
-  output_dir: "runs/training/EgoLanesLite_8class_no_crop/"
+  name: "complete_unet_9class_fcn_skip_cbam_batch8_sigmoid_0.5_cross"
+  output_dir: "runs/training/EgoLanesLite_9class_strat_compandgopro_w_sampler/"
   seed: 42
   device: "cuda"    # "cuda", "cuda:0", or "cpu"
   wandb:
     enabled: true
-    project_name: "EgoLanesLite_8class_no_crop"     #it is fixed from the account
+    project_name: "EgoLanesLite_9class_strat_compandgopro_w_sampler"     #it is fixed from the account
 
 checkpoint:
   load_from:   # path to checkpoint to load before training
@@ -13,14 +13,14 @@ checkpoint:
 
 dataset:
   training_sets: ["curvelanes"]    # <--- LIST OF DATASETS TO USE FOR TRAIN
-  curvelanes_root: "/home/new_user/Desktop/shared-data/Line/Training/Train_Lane_Detection/Line_Annotations_New/curvelane_complete_label_no_crop/"
+  curvelanes_root: "/home/new_user/Desktop/shared-data/Line/Training/Train_Lane_Detection/Line_Annotations_New/curvelanes_strat_compandgopro_9label/"
 
   validation_sets: ["curvelanes"]    # <--- LIST OF DATASETS TO USE FOR VALIDATION
 
   #augmentations settings for all datasets
   augmentations:
     remove_car_hood: true # removes top by 160px and bottom by 120px (1080 → 800), then resized to 800x320
-    output_channels: 8
+    output_channels: 9
     normalize:
       enabled: true
       mean: [0.485, 0.456, 0.406]   # imagenet mean, RGB ORDER  
@@ -67,13 +67,28 @@ dataset:
 
 dataloader:
   batch_size: 8             # how many samples per optimization step
-  num_workers: 8            # how many workers for data loading
+  num_workers: 2            # how many workers for data loading
   pin_memory: true          # pin memory for dataloader
-  persistent_workers: true  # keep workers alive between epochs
+  persistent_workers: false  # keep workers alive between epochs
   drop_last: true           # drop last incomplete batch
-  prefetch_factor: 8        # number of batches to prefetch
+  prefetch_factor: 2        # number of batches to prefetch
   shuffle_train: true       # shuffle training data (random order, but complete every sample before epoch)
   shuffle_val: false        # do not shuffle validation data
+  weighted_sampler:
+    enabled: true
+    replacement: true # same sample can be drawn multiple times with replacement
+    num_samples_per_epoch: null     # null -> use len(train_dataset)
+    min_weight: 1.0
+    class_weights:
+      continuous_white_line: 1.0
+      continuous_yellow_line: 1.2
+      dashed_white_line: 1.1
+      double_white_lines: 1.3
+      double_yellow_lines: 1.3
+      curb_line: 1.4
+      stop_line: 4.0
+      invisible_line: 7.0
+      Occluded_curb_lines: 15.0
 
 training:
   mode: "epoch"        # "epoch" or "steps" 
@@ -123,7 +138,7 @@ network:
   #   pooling: "avg"    # "avg" | "max"
   #   activation: "relu"    # "relu" | "elu" | "leaky_relu" | "tanh" | "sigmoid" | "none"
   #load a pretrained model to use as backbone (also as decoder if specified)
-  pretrained_model_path: "/home/new_user/qtpie/lane_detection/autoware_vision_pilot/runs/training/EgoLanesLite_8class_no_crop/complete_unet_med-att_fsc_batch8_sigmoid_0.5_cross/checkpoints/best.pth"
+  # pretrained_model_path: "/home/new_user/qtpie/lane_detection/autoware_vision_pilot/runs/training/EgoLanesLite_8class_no_crop/complete_unet_med-att_fsc_batch8_sigmoid_0.5_cross/checkpoints/best.pth"
 
   backbone:
     type: "efficientnet_b0"  # e.g., "resnet50", "efficientnet_b0", etc.
@@ -164,4 +179,4 @@ network:
     head_upsampling: 4
     head_kernel_size: 3
 
-  output_channels: 8
+  output_channels: 9
